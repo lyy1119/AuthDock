@@ -402,8 +402,8 @@ func TestLoginPageRedirectsWhenAuthenticated(t *testing.T) {
 		t.Fatalf("status = %d, want 303", rec.Code)
 	}
 	// Relative on purpose: see TestRedirectsStayRelativeUnderAPathPrefix.
-	if location := rec.Header().Get("Location"); location != "admin/users" {
-		t.Fatalf("Location = %q, want admin/users", location)
+	if location := rec.Header().Get("Location"); location != "admin/" {
+		t.Fatalf("Location = %q, want admin/", location)
 	}
 }
 
@@ -449,8 +449,8 @@ func TestRedirectsStayRelativeUnderAPathPrefix(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303", rec.Code)
 	}
-	if location := rec.Header().Get("Location"); location != "admin/users" {
-		t.Fatalf("Location = %q, want admin/users", location)
+	if location := rec.Header().Get("Location"); location != "admin/" {
+		t.Fatalf("Location = %q, want admin/", location)
 	}
 }
 
@@ -467,8 +467,8 @@ func TestIndexRedirectsAdminToUserManagement(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303", rec.Code)
 	}
-	if location := rec.Header().Get("Location"); location != "admin/users" {
-		t.Fatalf("Location = %q, want admin/users", location)
+	if location := rec.Header().Get("Location"); location != "admin/" {
+		t.Fatalf("Location = %q, want admin/", location)
 	}
 }
 

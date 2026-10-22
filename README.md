@@ -9,7 +9,8 @@ for the management area.
 
 ## Requirements
 
-- Go 1.27 or newer
+- Go 1.27 or newer (the only requirement to build and run the binary)
+- Node.js 20 or newer, only when rebuilding the management UI
 
 ## Run
 
@@ -101,24 +102,37 @@ prefix they would be requested from the proxy root and answered by it (the
 
 ## Build
 
-Bare `make` only prints help; targets do the work:
-
 ```sh
-make                   # list every target
-make build             # Linux x86_64   -> bin/authdock
-make build-windows     # Windows x86_64 -> bin/authdock.exe
-make build-all         # both at once
-make ci                # fmt-check + vet + test + both builds
-make release-artifacts # dist/ with tar.gz, zip and checksums.txt
+make             # list every target
+make web         # build only the frontend bundle (npm ci on first run)
+make build       # frontend + Linux x86_64 binary -> bin/authdock
+make build-backend  # Go only, reusing the committed bundle (no Node needed)
+make build-windows  # frontend + Windows x86_64 -> bin/authdock.exe
+make build-all      # both platforms
+make web-check      # TypeScript type check, no output written
+make ci             # fmt-check + vet + test + web-check + both builds
 ```
 
-Both dependencies are pure Go, so cross-compilation needs no C toolchain:
+Every build target embeds `internal/webui/dist` into the binary, so the result
+is a single self-contained executable — copy it to a server and run it. The
+bundle is committed to the repository on purpose: `go build` and `go test` work
+on a machine without Node, and only `make web` (or a `make build`) needs the
+Node toolchain.
+
+Two dependencies are pure Go, so cross-compilation needs no C toolchain:
 `CGO_ENABLED` stays `0`. `VERSION`, `COMMIT` and `BUILD_DATE` are injected via
 `-ldflags`, so a built binary reports them:
 
 ```text
 $ bin/authdock -version
 AuthDock v0.1.0 (commit abc1234, built 2026-01-01T00:00:00Z)
+```
+
+### Frontend development
+
+```sh
+make run                  # backend on http://127.0.0.1:8080
+cd web && npm run dev     # Vite on http://127.0.0.1:5173, /api proxied to the backend
 ```
 
 Docker images and GitHub releases are reserved for CI. `make help` lists
@@ -128,18 +142,18 @@ pipeline cannot silently publish nothing.
 
 ## Pages
 
-| Path              | Description                                              |
-| ----------------- | -------------------------------------------------------- |
-| `/login`          | Login page                                               |
-| `/admin/users`    | 用户管理: inline role/password edits, create and delete  |
-| `/admin/gateway`  | 网关设置: one accordion per account with its routing rules |
-| `/admin/settings` | 系统设置: gateway base domain                            |
-| `/healthz`        | Liveness probe (`ok`)                                    |
+| Path                | Description                                              |
+| ------------------- | -------------------------------------------------------- |
+| `/login`            | Login page (served by the Go handler, no build step)     |
+| `/admin/`           | Management app: `#/users`, `#/gates`, `#/settings`       |
+| `/healthz`          | Liveness probe (`ok`)                                    |
 
-The management pages are plain HTML plus vanilla JavaScript with inline SVG
-icons, embedded in the binary with `go:embed`, so `go build` still produces a
-single artifact and no Node toolchain is involved. Every asset and API URL is
-relative, so the pages keep working behind a path-prefixing reverse proxy.
+The management app is a React 19 + Ant Design single-page application built by
+Vite from `web/`. Its bundle is emitted into `internal/webui/dist`, committed,
+and embedded with `go:embed`, so **a plain `go build` produces one executable
+that already contains the UI**. Routes live in the URL hash and every asset URL
+is relative, which keeps the app working behind a path-prefixing reverse proxy
+(code-server's `/proxy/<port>/`, for example).
 
 ## API
 
@@ -153,38 +167,24 @@ relative, so the pages keep working behind a path-prefixing reverse proxy.
 
 ### Management (requires an admin session)
 
-| Method | Path                            | Description                                             |
-| ------ | ------------------------------- | ------------------------------------------------------- |
-| GET    | `/api/admin/users`              | List accounts (`self` marks the signed-in one)          |
-| POST   | `/api/admin/users`              | `{"username","password","role"}` create an account      |
-| PATCH  | `/api/admin/users/{id}`         | `{"role"?, "password"?}` change role and/or password    |
-| DELETE | `/api/admin/users/{id}`         | Delete an account and its gateway rules                 |
-| GET    | `/api/admin/gateway`            | Gateway domain plus every account with its rules        |
-| POST   | `/api/admin/gateway/rules`      | `{"user_id","subdomain","path","upstream"}`             |
-| PATCH  | `/api/admin/gateway/rules/{id}` | `{"subdomain","path","upstream"}`                       |
-| DELETE | `/api/admin/gateway/rules/{id}` | Delete a rule                                           |
-| GET    | `/api/admin/settings`           | `{"gateway_domain":"gw.example.net"}`                   |
-| PUT    | `/api/admin/settings`           | `{"gateway_domain":"gw.example.net"}`                   |
+| Method | Path                     | Description                                              |
+| ------ | ------------------------ | -------------------------------------------------------- |
+| GET    | `/api/admin/users`       | List accounts (`self` marks the signed-in one)           |
+| POST   | `/api/admin/users`       | `{"username","password","role"}` create an account       |
+| PATCH  | `/api/admin/users/{id}`  | `{"role"?, "password"?}` change role and/or password     |
+| DELETE | `/api/admin/users/{id}`  | Delete an account                                        |
+| GET    | `/api/admin/gates`       | `{"gateway_domain","gates":[...]}`                       |
+| POST   | `/api/admin/gates`       | `{"name","from","to_prefix","to_suffix"}`                |
+| PATCH  | `/api/admin/gates/{id}`  | Same fields; rewrites one gate                           |
+| DELETE | `/api/admin/gates/{id}`  | Delete a gate                                            |
+| GET    | `/api/admin/settings`    | `{"gateway_domain":"gw.example.net"}`                    |
+| PUT    | `/api/admin/settings`    | `{"gateway_domain":"gw.example.net"}`                    |
 
 Guard rails: a session is re-validated against the database on every management
 call (so a role change or deletion takes effect immediately), the last admin
 cannot be demoted or deleted, and an admin cannot delete the account they are
 signed in with. Demoting your own account succeeds, revokes the session and
 answers `{"logged_out":true}`.
-
-Responses are JSON; failures use a uniform envelope:
-
-```json
-{"ok": false, "code": "invalid_credentials", "message": "用户名或密码错误"}
-```
-
-Error codes: `invalid_request`, `invalid_credentials`, `admin_only`,
-`too_many_attempts`, `unauthenticated`, `method_not_allowed`, `not_found`,
-`username_taken`, `last_admin`, `self_delete`, `internal_error`.
-
-A successful login sets an `authdock_session` cookie (`HttpOnly`,
-`SameSite=Strict`, `Secure` when served over TLS). Sessions live in memory, so
-restarting AuthDock signs the administrator out.
 
 ## Data model
 
@@ -206,19 +206,30 @@ CREATE TABLE settings (
     value TEXT NOT NULL
 );
 
-CREATE TABLE gateway_rules (
+CREATE TABLE gate (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-    subdomain  TEXT    NOT NULL,     -- single DNS label or '*'
-    path       TEXT    NOT NULL DEFAULT '*',  -- '*' or an absolute path
-    upstream   TEXT    NOT NULL,     -- http(s) URL, no embedded credentials
-    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    name       TEXT    NOT NULL,     -- display name, e.g. 日历
+    "from"     TEXT    NOT NULL,     -- upstream: 10.0.0.1:1234 or http://10.0.0.1:1234
+    to_prefix  TEXT    NOT NULL,     -- subdomain label on the gateway domain
+    to_suffix  TEXT    NOT NULL DEFAULT '',  -- path prefix before the forwarded path
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (to_prefix, to_suffix)
 );
+```
+
+A gate publishes one upstream service. With the gateway domain `gw.example.net`,
+a gate with `to_prefix = calendar`, `to_suffix = app/` and
+`from = 10.0.0.1:1234` means:
+
+```text
+https://calendar.gw.example.net/app/<rest>   ->   http://10.0.0.1:1234/<rest>
 ```
 
 Schema changes are versioned: `PRAGMA user_version` records how many entries of
 `internal/store/migrations.go` have been applied, and an existing database
-upgrades in place on the next start (covered by a migration test).
+upgrades in place on the next start (covered by migration tests). Migration 3
+introduces the `gate` table and drops the earlier per-user `gateway_rules`
+table.
 
 Roles are `user` and `admin`; only `admin` accounts may sign in to the
 management area. Passwords are stored as Argon2id hashes in PHC string form
@@ -243,7 +254,9 @@ permissions because they contain password hashes.
 - Passwords chosen in the admin area must be at least 8 bytes; resets store a
   fresh Argon2id hash and never return the old one.
 - Responses carry `X-Content-Type-Options`, `X-Frame-Options`,
-  `Referrer-Policy` and a restrictive `Content-Security-Policy`.
+  `Referrer-Policy` and a `Content-Security-Policy` that allows scripts and
+  styles only from the app itself (`'self'`) plus inline, which the embedded
+  bundle and the login page need.
 
 ## Layout
 
@@ -252,8 +265,10 @@ main.go                     wiring: flags, database, HTTP server, one-time banne
 internal/passwd             Argon2id hashing, password generation, username rules
 internal/store              SQLite schema, users table, bootstrap admin seeding
 internal/httpapi            routes, auth and admin handlers, sessions, limiter
-internal/httpapi/templates  embedded login page and the three admin pages
-internal/httpapi/static     admin stylesheet and the vanilla-JS page scripts
+internal/httpapi/templates  the login page served by the Go handler
+internal/webui              go:embed of the built bundle + SPA file server
+internal/webui/dist         Vite output (committed, embedded into the binary)
+web                         React 19 + Ant Design sources (Vite, TypeScript)
 Makefile                    build, cross-compile, quality gates, reserved docker/release targets
 ```
 

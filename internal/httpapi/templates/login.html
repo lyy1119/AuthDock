@@ -101,7 +101,7 @@
 
       if (response.ok && data.ok) {
         alert('登录成功');
-        window.location.href = new URL('admin/users', baseUrl).href;
+        window.location.href = new URL('admin/', baseUrl).href;
         return;
       }
       message.textContent = data.message || ('登录失败（HTTP ' + response.status + '）');

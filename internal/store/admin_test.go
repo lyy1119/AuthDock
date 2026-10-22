@@ -87,7 +87,7 @@ func TestSetUserPassword(t *testing.T) {
 	}
 }
 
-func TestDeleteUserRemovesGatewayRules(t *testing.T) {
+func TestDeleteUserLeavesGatesAlone(t *testing.T) {
 	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
 	ctx := context.Background()
 
@@ -95,8 +95,8 @@ func TestDeleteUserRemovesGatewayRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	if _, err := db.CreateGatewayRule(ctx, alice.ID, "calendar", "*", "http://127.0.0.1:9000/"); err != nil {
-		t.Fatalf("CreateGatewayRule: %v", err)
+	if _, err := db.CreateGate(ctx, "日历", "10.0.0.1:1234", "calendar", ""); err != nil {
+		t.Fatalf("CreateGate: %v", err)
 	}
 	if err := db.DeleteUser(ctx, alice.ID); err != nil {
 		t.Fatalf("DeleteUser: %v", err)
@@ -104,12 +104,12 @@ func TestDeleteUserRemovesGatewayRules(t *testing.T) {
 	if _, err := db.GetUserByID(ctx, alice.ID); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("user still present after delete: %v", err)
 	}
-	rules, err := db.ListGatewayRules(ctx)
+	gates, err := db.ListGates(ctx)
 	if err != nil {
-		t.Fatalf("ListGatewayRules: %v", err)
+		t.Fatalf("ListGates: %v", err)
 	}
-	if len(rules) != 0 {
-		t.Fatalf("rules survived the user delete: %+v", rules)
+	if len(gates) != 1 {
+		t.Fatalf("gates = %+v, want the gate to survive a user deletion", gates)
 	}
 	if err := db.DeleteUser(ctx, alice.ID); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("second DeleteUser = %v, want ErrUserNotFound", err)
@@ -196,7 +196,7 @@ func TestMigrateFromVersion1(t *testing.T) {
 	if _, err := db.Setting(ctx, SettingsKeyGatewayDomain); err != nil {
 		t.Fatalf("settings table missing after migration: %v", err)
 	}
-	if _, err := db.ListGatewayRules(ctx); err != nil {
-		t.Fatalf("gateway_rules table missing after migration: %v", err)
+	if _, err := db.ListGates(ctx); err != nil {
+		t.Fatalf("gate table missing after migration: %v", err)
 	}
 }

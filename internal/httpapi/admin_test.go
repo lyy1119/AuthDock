@@ -70,7 +70,7 @@ func userIDByName(t *testing.T, users []adminUser, name string) int64 {
 func TestAdminAPIRequiresSession(t *testing.T) {
 	env := newTestEnv(t)
 
-	for _, path := range []string{"/api/admin/users", "/api/admin/settings", "/api/admin/gateway"} {
+	for _, path := range []string{"/api/admin/users", "/api/admin/settings", "/api/admin/gates"} {
 		rec := doJSON(t, env, http.MethodGet, path, nil, nil)
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("GET %s without a session = %d, want 401", path, rec.Code)
@@ -90,7 +90,7 @@ func TestAdminAPIRequiresAdminRole(t *testing.T) {
 	}
 	cookie := &http.Cookie{Name: SessionCookieName, Value: token}
 
-	for _, path := range []string{"/api/admin/users", "/api/admin/settings", "/api/admin/gateway"} {
+	for _, path := range []string{"/api/admin/users", "/api/admin/settings", "/api/admin/gates"} {
 		rec := doJSON(t, env, http.MethodGet, path, cookie, nil)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("GET %s as a normal user = %d, want 403", path, rec.Code)
@@ -322,93 +322,108 @@ func TestAdminSettings(t *testing.T) {
 	}
 }
 
-func TestAdminGatewayRules(t *testing.T) {
+func TestAdminGates(t *testing.T) {
 	env := newTestEnv(t)
 	cookie := adminCookie(t, env)
 
-	data := doJSON(t, env, http.MethodGet, "/api/admin/gateway", cookie, nil)
-	if data.Code != http.StatusOK {
-		t.Fatalf("gateway status = %d, body = %s", data.Code, data.Body.String())
+	rec := doJSON(t, env, http.MethodGet, "/api/admin/gates", cookie, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("gates status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	var gateway adminGatewayResponse
-	if err := json.Unmarshal(data.Body.Bytes(), &gateway); err != nil {
-		t.Fatalf("decode gateway: %v", err)
+	var list adminGateListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode gates: %v", err)
 	}
-	if len(gateway.Users) != 2 {
-		t.Fatalf("gateway users = %d, want 2", len(gateway.Users))
+	if len(list.Gates) != 0 {
+		t.Fatalf("expected no gates, got %+v", list.Gates)
 	}
-	for _, user := range gateway.Users {
-		if len(user.Rules) != 0 {
-			t.Fatalf("expected no rules, got %+v", user.Rules)
+
+	created := doJSON(t, env, http.MethodPost, "/api/admin/gates", cookie, map[string]string{
+		"name":      "日历",
+		"from":      "10.0.0.1:1234",
+		"to_prefix": "Calendar",
+		"to_suffix": "/app/",
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create gate = %d, body = %s", created.Code, created.Body.String())
+	}
+	var createdGate adminGateResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &createdGate); err != nil {
+		t.Fatalf("decode gate: %v", err)
+	}
+	if createdGate.Gate.ID == 0 || createdGate.Gate.ToPrefix != "calendar" || createdGate.Gate.ToSuffix != "app/" {
+		t.Fatalf("gate was not normalized: %+v", createdGate.Gate)
+	}
+
+	duplicate := doJSON(t, env, http.MethodPost, "/api/admin/gates", cookie, map[string]string{
+		"name":      "重复",
+		"from":      "10.0.0.2:1234",
+		"to_prefix": "calendar",
+		"to_suffix": "app/",
+	})
+	if duplicate.Code != http.StatusConflict || errorCode(t, duplicate) != "gate_exists" {
+		t.Fatalf("duplicate route = %d %q, want 409 gate_exists", duplicate.Code, errorCode(t, duplicate))
+	}
+
+	patched := doJSON(t, env, http.MethodPatch, "/api/admin/gates/"+itoa(createdGate.Gate.ID), cookie, map[string]string{
+		"name":      "新日历",
+		"from":      "http://10.0.0.2:8080",
+		"to_prefix": "cal",
+		"to_suffix": "",
+	})
+	if patched.Code != http.StatusOK {
+		t.Fatalf("patch gate = %d, body = %s", patched.Code, patched.Body.String())
+	}
+
+	for name, body := range map[string]map[string]string{
+		"empty name":      {"name": "", "from": "10.0.0.1:1", "to_prefix": "calendar", "to_suffix": ""},
+		"bad upstream":    {"name": "x", "from": "ftp://host", "to_prefix": "calendar", "to_suffix": ""},
+		"bad prefix":      {"name": "x", "from": "10.0.0.1:1", "to_prefix": "with.dot", "to_suffix": ""},
+		"space in suffix": {"name": "x", "from": "10.0.0.1:1", "to_prefix": "calendar", "to_suffix": "a b"},
+	} {
+		rec := doJSON(t, env, http.MethodPost, "/api/admin/gates", cookie, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want 400", name, rec.Code)
 		}
 	}
 
-	adminID := gateway.Users[0].ID
-	created := doJSON(t, env, http.MethodPost, "/api/admin/gateway/rules", cookie, map[string]any{
-		"user_id":   adminID,
-		"subdomain": "calendar",
-		"path":      "*",
-		"upstream":  "http://10.0.0.1:10123/",
-	})
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create rule = %d, body = %s", created.Code, created.Body.String())
-	}
-	var ruleBody adminRuleResponse
-	if err := json.Unmarshal(created.Body.Bytes(), &ruleBody); err != nil {
-		t.Fatalf("decode rule: %v", err)
-	}
-	if ruleBody.Rule.ID == 0 || ruleBody.Rule.Username != testAdminUsername {
-		t.Fatalf("unexpected rule %+v", ruleBody.Rule)
+	if rec := doJSON(t, env, http.MethodPatch, "/api/admin/gates/9999", cookie, map[string]string{
+		"name": "x", "from": "10.0.0.1:1", "to_prefix": "calendar", "to_suffix": "",
+	}); rec.Code != http.StatusNotFound {
+		t.Fatalf("patch unknown gate = %d, want 404", rec.Code)
 	}
 
-	patched := doJSON(t, env, http.MethodPatch, "/api/admin/gateway/rules/"+itoa(ruleBody.Rule.ID), cookie, map[string]string{
-		"subdomain": "*",
-		"path":      "/api",
-		"upstream":  "http://127.0.0.1:9000/",
-	})
-	if patched.Code != http.StatusOK {
-		t.Fatalf("patch rule = %d, body = %s", patched.Code, patched.Body.String())
-	}
-
-	invalid := doJSON(t, env, http.MethodPost, "/api/admin/gateway/rules", cookie, map[string]any{
-		"user_id":   adminID,
-		"subdomain": "calendar",
-		"path":      "*",
-		"upstream":  "ftp://127.0.0.1/",
-	})
-	if invalid.Code != http.StatusBadRequest {
-		t.Fatalf("invalid upstream = %d, want 400", invalid.Code)
-	}
-
-	unknownUser := doJSON(t, env, http.MethodPost, "/api/admin/gateway/rules", cookie, map[string]any{
-		"user_id":   9999,
-		"subdomain": "calendar",
-		"path":      "*",
-		"upstream":  "http://127.0.0.1:9000/",
-	})
-	if unknownUser.Code != http.StatusNotFound {
-		t.Fatalf("rule for an unknown user = %d, want 404", unknownUser.Code)
-	}
-
-	deleted := doJSON(t, env, http.MethodDelete, "/api/admin/gateway/rules/"+itoa(ruleBody.Rule.ID), cookie, nil)
+	deleted := doJSON(t, env, http.MethodDelete, "/api/admin/gates/"+itoa(createdGate.Gate.ID), cookie, nil)
 	if deleted.Code != http.StatusOK {
-		t.Fatalf("delete rule = %d, body = %s", deleted.Code, deleted.Body.String())
+		t.Fatalf("delete gate = %d, body = %s", deleted.Code, deleted.Body.String())
 	}
-	if again := doJSON(t, env, http.MethodDelete, "/api/admin/gateway/rules/"+itoa(ruleBody.Rule.ID), cookie, nil); again.Code != http.StatusNotFound {
+	if again := doJSON(t, env, http.MethodDelete, "/api/admin/gates/"+itoa(createdGate.Gate.ID), cookie, nil); again.Code != http.StatusNotFound {
 		t.Fatalf("second delete = %d, want 404", again.Code)
 	}
+}
+
+// assetPath pulls the built script URL out of the embedded index.html.
+func assetPath(t *testing.T, html string) string {
+	t.Helper()
+	marker := `src="./`
+	index := strings.Index(html, marker)
+	if index < 0 {
+		t.Fatalf("index.html has no relative script tag: %s", html)
+	}
+	rest := html[index+len(marker):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		t.Fatalf("unterminated script tag in index.html: %s", html)
+	}
+	return rest[:end]
 }
 
 func TestAdminPages(t *testing.T) {
 	env := newTestEnv(t)
 	cookie := adminCookie(t, env)
 
-	pages := map[string]string{
-		"/admin/users":    "用户管理",
-		"/admin/gateway":  "网关设置",
-		"/admin/settings": "系统设置",
-	}
-	for path, marker := range pages {
+	// The app shell is served for the SPA entry point and for any client route.
+	for _, path := range []string{"/admin/", "/admin/users", "/admin/gates", "/admin/settings"} {
 		rec := doRequest(t, env, http.MethodGet, path, cookie)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET %s = %d, want 200", path, rec.Code)
@@ -417,14 +432,22 @@ func TestAdminPages(t *testing.T) {
 			t.Fatalf("GET %s content type = %q", path, contentType)
 		}
 		body := rec.Body.String()
-		if !strings.Contains(body, marker) {
-			t.Fatalf("GET %s does not contain %q", path, marker)
+		if !strings.Contains(body, `id="root"`) {
+			t.Fatalf("GET %s does not look like the app shell", path)
 		}
-		// Assets and links must stay relative so the pages survive a prefixing
-		// reverse proxy.
 		if strings.Contains(body, `href="/`) || strings.Contains(body, `src="/`) {
-			t.Fatalf("GET %s hard-codes an absolute URL", path)
+			t.Fatalf("GET %s hard-codes an absolute asset URL", path)
 		}
+	}
+
+	// The built asset is served with an immutable cache header.
+	shell := doRequest(t, env, http.MethodGet, "/admin/", cookie).Body.String()
+	asset := doRequest(t, env, http.MethodGet, "/admin/"+assetPath(t, shell), nil)
+	if asset.Code != http.StatusOK {
+		t.Fatalf("built asset = %d, want 200", asset.Code)
+	}
+	if cache := asset.Header().Get("Cache-Control"); !strings.Contains(cache, "immutable") {
+		t.Fatalf("built asset Cache-Control = %q, want immutable", cache)
 	}
 
 	// Anonymous visitors are redirected to the login page, relatively.
@@ -434,42 +457,15 @@ func TestAdminPages(t *testing.T) {
 			anon.Code, anon.Header().Get("Location"))
 	}
 
-	// The bare /admin path sends admins to the user page.
+	// The bare /admin path sends admins into the app shell.
 	root := doRequest(t, env, http.MethodGet, "/admin", cookie)
-	if root.Code != http.StatusSeeOther || root.Header().Get("Location") != "admin/users" {
-		t.Fatalf("/admin = %d %q, want 303 admin/users", root.Code, root.Header().Get("Location"))
+	if root.Code != http.StatusSeeOther || root.Header().Get("Location") != "admin/" {
+		t.Fatalf("/admin = %d %q, want 303 admin/", root.Code, root.Header().Get("Location"))
 	}
 
-	// Unknown admin paths are 404.
-	if rec := doRequest(t, env, http.MethodGet, "/admin/nope", cookie); rec.Code != http.StatusNotFound {
-		t.Fatalf("/admin/nope = %d, want 404", rec.Code)
-	}
-}
-
-func TestAdminAssets(t *testing.T) {
-	env := newTestEnv(t)
-
-	rec := doRequest(t, env, http.MethodGet, "/admin/assets/admin.css", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("admin.css = %d, want 200", rec.Code)
-	}
-	if contentType := rec.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/css") {
-		t.Fatalf("admin.css content type = %q", contentType)
-	}
-
-	js := doRequest(t, env, http.MethodGet, "/admin/assets/users.js", nil)
-	if js.Code != http.StatusOK || !strings.HasPrefix(js.Header().Get("Content-Type"), "text/javascript") {
-		t.Fatalf("users.js = %d %q", js.Code, js.Header().Get("Content-Type"))
-	}
-
-	// The shared script derives the API base from the page URL, not from "/".
-	shared := doRequest(t, env, http.MethodGet, "/admin/assets/admin.js", nil)
-	if !strings.Contains(shared.Body.String(), "../api/admin/") {
-		t.Fatal("admin.js does not derive a relative API base")
-	}
-
-	if unknown := doRequest(t, env, http.MethodGet, "/admin/assets/secret.txt", nil); unknown.Code != http.StatusNotFound {
-		t.Fatalf("unknown asset = %d, want 404", unknown.Code)
+	// A missing file with an extension is a real 404, not the app shell.
+	if rec := doRequest(t, env, http.MethodGet, "/admin/assets/missing.js", cookie); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing asset = %d, want 404", rec.Code)
 	}
 }
 

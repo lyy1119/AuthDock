@@ -22,8 +22,7 @@ CREATE INDEX IF NOT EXISTS users_role_idx ON users (role);
 `,
 
 	// 2: gateway configuration. settings is a small key/value table for the
-	// gateway domain and future knobs; gateway_rules holds the per-user routing
-	// rules the admin area edits. Deleting a user removes their rules.
+	// gateway domain and future knobs.
 	`
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -40,6 +39,26 @@ CREATE TABLE IF NOT EXISTS gateway_rules (
     CONSTRAINT gateway_rules_path_len      CHECK (length(path) BETWEEN 1 AND 255)
 );
 CREATE INDEX IF NOT EXISTS gateway_rules_user_idx ON gateway_rules (user_id);
+`,
+
+	// 3: the gate table replaces the per-user gateway rules. A gate maps
+	// https://<to_prefix>.<gateway domain>/<to_suffix><rest> to <from>/<rest>,
+	// so it carries a display name instead of an owner.
+	`
+CREATE TABLE IF NOT EXISTS gate (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    "from"     TEXT    NOT NULL,
+    to_prefix  TEXT    NOT NULL,
+    to_suffix  TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    CONSTRAINT gate_name_len   CHECK (length(name) BETWEEN 1 AND 50),
+    CONSTRAINT gate_from_len   CHECK (length("from") BETWEEN 1 AND 255),
+    CONSTRAINT gate_prefix_len CHECK (length(to_prefix) BETWEEN 1 AND 63),
+    CONSTRAINT gate_suffix_len CHECK (length(to_suffix) <= 255)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS gate_route_idx ON gate (to_prefix, to_suffix);
+DROP TABLE IF EXISTS gateway_rules;
 `,
 }
 

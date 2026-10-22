@@ -7,7 +7,11 @@
 #   bin/authdock.exe    Windows x86_64
 #   dist/               发布包（tar.gz / zip / checksums.txt）
 #
-# 两个依赖（modernc.org/sqlite、golang.org/x/crypto/argon2）都是纯 Go，
+# 管理界面是 React（web/）用 Vite 构建的产物，输出到 internal/webui/dist 并
+# go:embed 进二进制：任何一个 `go build` 出来的都是自带界面的单文件程序，
+# 前端源码改动后跑 `make web`（或 `make build`）重新生成产物。
+#
+# 两个 Go 依赖（modernc.org/sqlite、golang.org/x/crypto/argon2）都是纯 Go，
 # 因此交叉编译不需要 C 工具链，CGO_ENABLED 默认关闭。
 
 .DEFAULT_GOAL := help
@@ -16,6 +20,12 @@ APP         := authdock
 BIN_DIR     ?= bin
 RELEASE_DIR ?= dist
 DB_FILE     ?= data/authdock.db
+
+# 前端（React + Vite + Ant Design）
+WEB_DIR     ?= web
+WEB_DIST    := internal/webui/dist
+NPM         ?= npm
+NODE_MODULES := $(WEB_DIR)/node_modules
 
 # 版本信息：优先取 git tag，其次短提交号；CI 可通过环境变量覆盖。
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -43,7 +53,8 @@ DOCKERFILE ?= Dockerfile
 SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo 'sha256sum' || echo 'shasum -a 256')
 
 .PHONY: help version
-.PHONY: build build-linux build-windows build-all run reset-password clean
+.PHONY: build build-linux build-windows build-all build-backend run reset-password clean
+.PHONY: web-install web web-check dev clean-web
 .PHONY: fmt fmt-check vet tidy test test-race ci
 .PHONY: docker-build docker-push docker-manifest
 .PHONY: release-artifacts release
@@ -63,21 +74,43 @@ version: ## 打印将要注入的版本信息
 	@echo "build date: $(BUILD_DATE)"
 	@echo "go:         $$($(GO) version)"
 
+##@ 前端（React + Vite，产物 go:embed 进二进制）
+
+$(NODE_MODULES): $(WEB_DIR)/package.json $(WEB_DIR)/package-lock.json
+	cd $(WEB_DIR) && $(NPM) ci
+
+web-install: $(NODE_MODULES) ## 安装前端依赖（npm ci）
+
+web: $(NODE_MODULES) ## 构建前端产物到 internal/webui/dist
+	cd $(WEB_DIR) && $(NPM) run build
+
+web-check: $(NODE_MODULES) ## 前端类型检查（不改文件）
+	cd $(WEB_DIR) && $(NPM) run typecheck
+
+dev: ## 开发模式：后端 + Vite 开发服务器（两个终端）
+	@echo '后端: make run            （http://127.0.0.1:8080）'
+	@echo '前端: cd $(WEB_DIR) && $(NPM) run dev   （http://127.0.0.1:5173，/api 已代理到后端）'
+
 ##@ 构建
 
-build: build-linux ## 编译 Linux x86_64（等同 build-linux）
+build: build-linux ## 编译 Linux x86_64（含前端，等同 build-linux）
 
-build-linux: ## 编译 Linux x86_64 -> bin/authdock
+build-linux: web ## 编译 Linux x86_64 -> bin/authdock（内嵌管理界面）
 	@mkdir -p $(BIN_DIR)
 	@echo "==> linux/amd64   $(BIN_DIR)/$(APP)   ($(VERSION))"
 	@CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=amd64 \
 		$(GO) build $(GOFLAGS) -trimpath -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(APP) .
 
-build-windows: ## 交叉编译 Windows x86_64 -> bin/authdock.exe
+build-windows: web ## 交叉编译 Windows x86_64 -> bin/authdock.exe（内嵌管理界面）
 	@mkdir -p $(BIN_DIR)
 	@echo "==> windows/amd64 $(BIN_DIR)/$(APP).exe ($(VERSION))"
 	@CGO_ENABLED=$(CGO_ENABLED) GOOS=windows GOARCH=amd64 \
 		$(GO) build $(GOFLAGS) -trimpath -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(APP).exe .
+
+build-backend: ## 只编译 Go 后端（用仓库里已提交的前端产物，不需要 Node）
+	@mkdir -p $(BIN_DIR)
+	@echo "==> backend only   $(BIN_DIR)/$(APP)"
+	@CGO_ENABLED=$(CGO_ENABLED) $(GO) build $(GOFLAGS) -trimpath -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(APP) .
 
 build-all: build-linux build-windows ## 同时构建 Linux 与 Windows
 
@@ -91,6 +124,11 @@ reset-password: ## 重置 admin 密码并只打印一次（数据库默认 data/
 clean: ## 清理构建产物（bin/ 与 dist/）
 	@rm -rf $(BIN_DIR) $(RELEASE_DIR)
 	@echo "==> 已清理 $(BIN_DIR)/ $(RELEASE_DIR)/"
+
+clean-web: ## 清理前端产物与依赖（之后需 make web 才能 go build）
+	@rm -rf $(WEB_DIST) $(NODE_MODULES)
+	@echo "==> 已清理 $(WEB_DIST)/ $(NODE_MODULES)/"
+	@echo "    注意：go:embed 需要 $(WEB_DIST)，重新编译前请先运行 make web"
 
 ##@ 质量检查
 
@@ -117,7 +155,7 @@ test: ## 运行单元测试
 test-race: ## 带 race detector 运行测试（需要 cgo 与 gcc）
 	CGO_ENABLED=1 $(GO) test -race ./...
 
-ci: fmt-check vet test build-all ## CI 流水线：格式 + vet + 测试 + 双平台构建
+ci: fmt-check vet test web-check build-all ## CI 流水线：格式 + vet + 测试 + 前端类型检查 + 双平台构建
 
 ##@ Docker 镜像（预留，等待 Dockerfile 与 GH Actions workflow）
 #
@@ -178,7 +216,7 @@ release: ## 预留：打 tag 后由 GitHub Actions 发布（本地不执行）
 #
 # .github/workflows/ci.yml
 #   on: [push, pull_request]
-#   steps: make ci                       # fmt-check + vet + test + build-all
+#   steps: actions/setup-node + make ci  # fmt-check + vet + test + web-check + build-all
 #
 # .github/workflows/docker.yml
 #   on: { push: { branches: [main], tags: ["v*"] } }

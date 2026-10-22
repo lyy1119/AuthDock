@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lyy1119/AuthDock/internal/passwd"
@@ -118,6 +119,37 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 		return fmt.Errorf("store: delete user: %w", err)
 	}
 	s.restrictFiles()
+	return nil
+}
+
+// ValidateGatewayDomain accepts "" (not configured) or a bare DNS name such as
+// "gw.example.net". A scheme, port, path or whitespace is rejected.
+func ValidateGatewayDomain(domain string) error {
+	if domain == "" {
+		return nil
+	}
+	if len(domain) > 253 {
+		return errors.New("store: gateway domain is too long")
+	}
+	if strings.ContainsAny(domain, "/:@ \t\r\n") {
+		return errors.New("store: gateway domain must be a bare host name")
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || len(label) > 63 {
+			return errors.New("store: gateway domain has an empty or overlong label")
+		}
+		if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return errors.New("store: gateway domain labels must not start or end with a hyphen")
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-':
+			default:
+				return fmt.Errorf("store: gateway domain contains unsupported character %q", c)
+			}
+		}
+	}
 	return nil
 }
 
