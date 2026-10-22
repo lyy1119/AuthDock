@@ -231,6 +231,79 @@ func (s *Store) restrictFiles() {
 	}
 }
 
+// CountUsers reports how many rows the users table holds.
+func (s *Store) CountUsers(ctx context.Context) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("store: count users: %w", err)
+	}
+	return count, nil
+}
+
+// ResetPassword generates a fresh random password for username, stores only its
+// Argon2id hash and returns the plaintext so the caller can print it exactly
+// once. It reports ErrUserNotFound when the account does not exist.
+func (s *Store) ResetPassword(ctx context.Context, username string) (string, error) {
+	password, err := passwd.GeneratePassword(passwd.BootstrapPasswordLen)
+	if err != nil {
+		return "", fmt.Errorf("store: generate password: %w", err)
+	}
+	hash, err := s.hasher.Hash(password)
+	if err != nil {
+		return "", fmt.Errorf("store: hash password: %w", err)
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE users SET password_hash = ? WHERE username = ?`, hash, username)
+	if err != nil {
+		return "", fmt.Errorf("store: update password: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("store: update password: %w", err)
+	}
+	if affected == 0 {
+		return "", ErrUserNotFound
+	}
+	s.restrictFiles()
+	return password, nil
+}
+
+// ResetAdminPassword generates a new password for the bootstrap administrator,
+// creating the account when it is missing, and returns the plaintext along with
+// a flag reporting whether the account had to be created.
+func (s *Store) ResetAdminPassword(ctx context.Context) (password string, created bool, err error) {
+	var exists int
+	err = s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM users WHERE username = ?`, BootstrapAdminUsername).Scan(&exists)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		created = true
+	case err != nil:
+		return "", false, fmt.Errorf("store: look up admin: %w", err)
+	}
+
+	password, err = passwd.GeneratePassword(passwd.BootstrapPasswordLen)
+	if err != nil {
+		return "", false, fmt.Errorf("store: generate password: %w", err)
+	}
+	hash, err := s.hasher.Hash(password)
+	if err != nil {
+		return "", false, fmt.Errorf("store: hash password: %w", err)
+	}
+
+	// Upsert: refresh the hash of an existing account, otherwise create the admin
+	// row. The role of an existing account is left untouched.
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)
+		ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash`,
+		BootstrapAdminUsername, hash, RoleAdmin,
+	); err != nil {
+		return "", false, fmt.Errorf("store: write admin password: %w", err)
+	}
+	s.restrictFiles()
+	return password, created, nil
+}
+
 // GetUserByUsername returns the account with the given username, matched
 // exactly (usernames are case sensitive).
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, error) {

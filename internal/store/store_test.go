@@ -179,6 +179,142 @@ func TestSeedBootstrapAdminSkipsNonEmptyTable(t *testing.T) {
 	}
 }
 
+func TestCountUsers(t *testing.T) {
+	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
+	ctx := context.Background()
+
+	if got, err := db.CountUsers(ctx); err != nil || got != 0 {
+		t.Fatalf("CountUsers on an empty table = %d, %v; want 0, nil", got, err)
+	}
+	if _, _, err := db.SeedBootstrapAdmin(ctx); err != nil {
+		t.Fatalf("SeedBootstrapAdmin: %v", err)
+	}
+	if got, err := db.CountUsers(ctx); err != nil || got != 1 {
+		t.Fatalf("CountUsers after seeding = %d, %v; want 1, nil", got, err)
+	}
+	if _, err := db.CreateUser(ctx, "bob", "password123", RoleUser); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if got, err := db.CountUsers(ctx); err != nil || got != 2 {
+		t.Fatalf("CountUsers after CreateUser = %d, %v; want 2, nil", got, err)
+	}
+}
+
+func TestResetPassword(t *testing.T) {
+	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
+	ctx := context.Background()
+
+	oldPassword, created, err := db.SeedBootstrapAdmin(ctx)
+	if err != nil || !created {
+		t.Fatalf("SeedBootstrapAdmin: created=%v err=%v", created, err)
+	}
+
+	newPassword, err := db.ResetPassword(ctx, BootstrapAdminUsername)
+	if err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if newPassword == oldPassword {
+		t.Fatal("ResetPassword returned the old password")
+	}
+	if len(newPassword) != passwd.BootstrapPasswordLen {
+		t.Fatalf("new password %q has length %d, want %d", newPassword, len(newPassword), passwd.BootstrapPasswordLen)
+	}
+
+	user, err := db.GetUserByUsername(ctx, BootstrapAdminUsername)
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if err := db.VerifyPassword(user, newPassword); err != nil {
+		t.Fatalf("new password does not verify: %v", err)
+	}
+	if err := db.VerifyPassword(user, oldPassword); !errors.Is(err, passwd.ErrMismatch) {
+		t.Fatalf("old password still verifies after the reset: %v", err)
+	}
+	if user.Role != RoleAdmin {
+		t.Fatalf("role = %q after the reset, want %q", user.Role, RoleAdmin)
+	}
+	if got := countUsers(t, db); got != 1 {
+		t.Fatalf("users count = %d, want 1", got)
+	}
+}
+
+func TestResetPasswordUnknownUser(t *testing.T) {
+	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
+	ctx := context.Background()
+
+	if _, _, err := db.SeedBootstrapAdmin(ctx); err != nil {
+		t.Fatalf("SeedBootstrapAdmin: %v", err)
+	}
+	if _, err := db.ResetPassword(ctx, "ghost"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("ResetPassword(ghost) = %v, want ErrUserNotFound", err)
+	}
+}
+
+func TestResetAdminPasswordCreatesMissingAccount(t *testing.T) {
+	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
+	ctx := context.Background()
+
+	password, created, err := db.ResetAdminPassword(ctx)
+	if err != nil {
+		t.Fatalf("ResetAdminPassword: %v", err)
+	}
+	if !created {
+		t.Fatal("ResetAdminPassword did not report creating the missing admin account")
+	}
+	if len(password) != passwd.BootstrapPasswordLen {
+		t.Fatalf("password %q has length %d, want %d", password, len(password), passwd.BootstrapPasswordLen)
+	}
+
+	user, err := db.GetUserByUsername(ctx, BootstrapAdminUsername)
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if user.Role != RoleAdmin {
+		t.Fatalf("role = %q, want %q", user.Role, RoleAdmin)
+	}
+	if err := db.VerifyPassword(user, password); err != nil {
+		t.Fatalf("new password does not verify: %v", err)
+	}
+}
+
+func TestResetAdminPasswordUpdatesExistingAccount(t *testing.T) {
+	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
+	ctx := context.Background()
+
+	oldPassword, created, err := db.SeedBootstrapAdmin(ctx)
+	if err != nil || !created {
+		t.Fatalf("SeedBootstrapAdmin: created=%v err=%v", created, err)
+	}
+
+	password, created, err := db.ResetAdminPassword(ctx)
+	if err != nil {
+		t.Fatalf("ResetAdminPassword: %v", err)
+	}
+	if created {
+		t.Fatal("ResetAdminPassword reported creating an account that already existed")
+	}
+	if password == oldPassword {
+		t.Fatal("ResetAdminPassword returned the old password")
+	}
+
+	user, err := db.GetUserByUsername(ctx, BootstrapAdminUsername)
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if err := db.VerifyPassword(user, password); err != nil {
+		t.Fatalf("new password does not verify: %v", err)
+	}
+	if err := db.VerifyPassword(user, oldPassword); !errors.Is(err, passwd.ErrMismatch) {
+		t.Fatalf("old password still verifies: %v", err)
+	}
+	if user.Role != RoleAdmin {
+		t.Fatalf("role = %q, want %q", user.Role, RoleAdmin)
+	}
+	if got := countUsers(t, db); got != 1 {
+		t.Fatalf("users count = %d, want 1", got)
+	}
+}
+
 func TestGetUserByUsername(t *testing.T) {
 	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
 	ctx := context.Background()

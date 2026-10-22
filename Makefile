@@ -15,6 +15,7 @@
 APP         := authdock
 BIN_DIR     ?= bin
 RELEASE_DIR ?= dist
+DB_FILE     ?= data/authdock.db
 
 # 版本信息：优先取 git tag，其次短提交号；CI 可通过环境变量覆盖。
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -42,7 +43,7 @@ DOCKERFILE ?= Dockerfile
 SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo 'sha256sum' || echo 'shasum -a 256')
 
 .PHONY: help version
-.PHONY: build build-linux build-windows build-all run clean
+.PHONY: build build-linux build-windows build-all run reset-password clean
 .PHONY: fmt fmt-check vet tidy test test-race ci
 .PHONY: docker-build docker-push docker-manifest
 .PHONY: release-artifacts release
@@ -83,6 +84,9 @@ build-all: build-linux build-windows ## 同时构建 Linux 与 Windows
 run: ## 本地前台运行（数据库 bin/dev.db）
 	@mkdir -p $(BIN_DIR)
 	$(GO) run . -addr 127.0.0.1:8080 -db $(BIN_DIR)/dev.db
+
+reset-password: ## 重置 admin 密码并只打印一次（数据库默认 data/authdock.db）
+	$(GO) run . -reset-admin-password -db $(DB_FILE)
 
 clean: ## 清理构建产物（bin/ 与 dist/）
 	@rm -rf $(BIN_DIR) $(RELEASE_DIR)

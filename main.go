@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -41,6 +42,8 @@ func run() error {
 	addr := flag.String("addr", envOr("AUTH_DOCK_ADDR", "127.0.0.1:8080"), "HTTP listen address")
 	dbPath := flag.String("db", envOr("AUTH_DOCK_DB", "data/authdock.db"), "path to the SQLite database file")
 	showVersion := flag.Bool("version", false, "print version information and exit")
+	resetAdminPassword := flag.Bool("reset-admin-password", false,
+		"give the admin account a new random password (creating the account if needed), print it once and exit")
 	flag.Parse()
 
 	if *showVersion {
@@ -64,17 +67,43 @@ func run() error {
 	}
 	defer db.Close()
 
-	ctx, cancelSeed := context.WithTimeout(context.Background(), 30*time.Second)
+	// Report and banner the absolute path: a relative path makes it far too easy
+	// to end up with two databases (one per working directory) and two different
+	// bootstrap passwords.
+	dbFile := *dbPath
+	if abs, err := filepath.Abs(*dbPath); err == nil {
+		dbFile = abs
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if *resetAdminPassword {
+		password, created, err := db.ResetAdminPassword(ctx)
+		if err != nil {
+			return fmt.Errorf("reset admin password: %w", err)
+		}
+		printResetBanner(dbFile, store.BootstrapAdminUsername, created, password)
+		return nil
+	}
+
 	password, created, err := db.SeedBootstrapAdmin(ctx)
-	cancelSeed()
 	if err != nil {
 		return fmt.Errorf("seed bootstrap administrator: %w", err)
 	}
 	if created {
-		printBootstrapCredentials(*dbPath, store.BootstrapAdminUsername, password)
+		printBootstrapCredentials(dbFile, store.BootstrapAdminUsername, password)
 		// Drop the reference as soon as the banner is written; the plaintext is
 		// not needed again and is never logged through slog.
 		password = ""
+	} else {
+		users, err := db.CountUsers(ctx)
+		if err != nil {
+			return fmt.Errorf("count users: %w", err)
+		}
+		logger.Info("users table already initialized; the bootstrap password is not printed again",
+			"users", users, "db", dbFile,
+			"hint", "run `authdock -reset-admin-password` if that password was lost or never saved")
 	}
 
 	handler := httpapi.New(httpapi.Options{
@@ -98,7 +127,7 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("AuthDock listening", "version", version, "addr", *addr, "db", *dbPath, "login_page", "http://"+*addr+"/login")
+		logger.Info("AuthDock listening", "version", version, "addr", *addr, "db", dbFile, "login_page", "http://"+*addr+"/login")
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
@@ -132,11 +161,34 @@ func printBootstrapCredentials(dbPath, username, password string) {
 
   Only show once —— 该密码只显示这一次，请立即保存到安全的地方。
   数据库中只保存 Argon2id 哈希，关闭本提示后无法再取回该密码。
-  （如需重置，请在数据库中删除该行后重启，程序会重新生成。）
+  登录时只填冒号右边这 8 个字符，不要带空格或 "password :" 前缀。
+  忘记密码可随时执行：authdock -reset-admin-password
   database : %s
 %s
 
 `, bannerRule, username, password, dbPath, bannerRule)
+}
+
+// printResetBanner writes the one-time replacement password for the admin
+// account after -reset-admin-password.
+func printResetBanner(dbFile, username string, created bool, password string) {
+	headline := "已重置管理员密码（Only show once）"
+	if created {
+		headline = "users 表中没有 admin 账号，已创建并生成密码（Only show once）"
+	}
+	fmt.Fprintf(os.Stdout, `
+%s
+  %s
+
+    username : %s
+    password : %s
+
+  该密码只显示这一次，请立即保存；数据库中只保存 Argon2id 哈希。
+  登录时只填冒号右边这 8 个字符，不要带空格或 "password :" 前缀。
+  database : %s
+%s
+
+`, bannerRule, headline, username, password, dbFile, bannerRule)
 }
 
 func envOr(key, fallback string) string {

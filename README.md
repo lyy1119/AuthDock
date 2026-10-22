@@ -18,10 +18,20 @@ go build -o authdock .
 ./authdock -addr 127.0.0.1:8080 -db data/authdock.db
 ```
 
-Then open <http://127.0.0.1:8080/login>.
+Then open <http://127.0.0.1:8080/login>. Running `./authdock` with no arguments
+works out of the box; these are the defaults:
 
-Flags can also be set through the environment: `AUTH_DOCK_ADDR` and
-`AUTH_DOCK_DB`.
+| Flag                    | Default (env)                             | Description                                    |
+| ----------------------- | ----------------------------------------- | ---------------------------------------------- |
+| `-addr`                 | `127.0.0.1:8080` (`AUTH_DOCK_ADDR`)       | HTTP listen address                            |
+| `-db`                   | `data/authdock.db` (`AUTH_DOCK_DB`)       | SQLite database file, relative to the CWD      |
+| `-version`              |                                           | Print build information and exit               |
+| `-reset-admin-password` |                                           | New random admin password (creates the account if missing), printed once, exit |
+
+The `-db` path is resolved to an absolute path in the start-up log and in the
+banner, because a relative path makes it easy to end up with two databases (and
+therefore two different bootstrap passwords) depending on the working
+directory.
 
 ### The bootstrap administrator
 
@@ -37,11 +47,36 @@ prints it to stdout **once**:
 
   Only show once —— 该密码只显示这一次，请立即保存到安全的地方。
   数据库中只保存 Argon2id 哈希，关闭本提示后无法再取回该密码。
+  登录时只填冒号右边这 8 个字符，不要带空格或 "password :" 前缀。
+  忘记密码可随时执行：authdock -reset-admin-password
+  database : /path/to/data/authdock.db
 ```
 
-Save that password: only the Argon2id hash is stored, so it cannot be recovered.
-To reset it, delete the `admin` row from the database and restart; the seeding
-runs again because the table is empty.
+Past the first start the table is no longer empty, so the banner does not
+reappear; the log says `users table already initialized` and keeps working with
+the same database.
+
+### Lost the bootstrap password?
+
+```sh
+./authdock -reset-admin-password            # or: make reset-password
+```
+
+This generates a new random password, stores its Argon2id hash and prints the
+plaintext once. The old password stops working immediately. If the admin account
+is gone (for example its row was deleted), the same command recreates it with
+the admin role, so it doubles as a lockout recovery path.
+
+Common reasons a login fails even though a password was printed somewhere:
+
+- the password was copied together with the `password : ` prefix or trailing
+  whitespace (only the 8 characters themselves are the password);
+- the server runs against a different database than the banner came from — the
+  start-up log prints the absolute `db` path, so compare them;
+- five wrong attempts lock the account for one minute (`429` with a
+  `Retry-After` header);
+- the admin database was deleted and re-seeded while the old process was still
+  running (each seed makes a new password).
 
 ## Build
 
