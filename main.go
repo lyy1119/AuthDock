@@ -21,6 +21,15 @@ import (
 
 const bannerRule = "──────────────────────────────────────────────────────────────────────"
 
+// Build metadata. Release builds inject real values through
+// -ldflags "-X main.version=... -X main.commit=... -X main.buildDate=...";
+// the defaults describe a plain `go build`.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("AuthDock stopped", "err", err)
@@ -31,7 +40,13 @@ func main() {
 func run() error {
 	addr := flag.String("addr", envOr("AUTH_DOCK_ADDR", "127.0.0.1:8080"), "HTTP listen address")
 	dbPath := flag.String("db", envOr("AUTH_DOCK_DB", "data/authdock.db"), "path to the SQLite database file")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("AuthDock %s (commit %s, built %s)\n", version, commit, buildDate)
+		return nil
+	}
 
 	setSecureUmask()
 
@@ -83,7 +98,7 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("AuthDock listening", "addr", *addr, "db", *dbPath, "login_page", "http://"+*addr+"/login")
+		logger.Info("AuthDock listening", "version", version, "addr", *addr, "db", *dbPath, "login_page", "http://"+*addr+"/login")
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}

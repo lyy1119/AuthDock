@@ -43,6 +43,33 @@ Save that password: only the Argon2id hash is stored, so it cannot be recovered.
 To reset it, delete the `admin` row from the database and restart; the seeding
 runs again because the table is empty.
 
+## Build
+
+Bare `make` only prints help; targets do the work:
+
+```sh
+make                   # list every target
+make build             # Linux x86_64   -> bin/authdock
+make build-windows     # Windows x86_64 -> bin/authdock.exe
+make build-all         # both at once
+make ci                # fmt-check + vet + test + both builds
+make release-artifacts # dist/ with tar.gz, zip and checksums.txt
+```
+
+Both dependencies are pure Go, so cross-compilation needs no C toolchain:
+`CGO_ENABLED` stays `0`. `VERSION`, `COMMIT` and `BUILD_DATE` are injected via
+`-ldflags`, so a built binary reports them:
+
+```text
+$ bin/authdock -version
+AuthDock v0.1.0 (commit abc1234, built 2026-01-01T00:00:00Z)
+```
+
+Docker images and GitHub releases are reserved for CI. `make help` lists
+`docker-build`, `docker-push` and `release`; they currently explain what is
+still missing (a `Dockerfile` and the workflow files) and exit non-zero, so a
+pipeline cannot silently publish nothing.
+
 ## API
 
 | Method | Path                 | Description                                            |
@@ -109,12 +136,14 @@ internal/passwd             Argon2id hashing, password generation, username rule
 internal/store              SQLite schema, users table, bootstrap admin seeding
 internal/httpapi            routes, login/logout/session handlers, sessions, limiter
 internal/httpapi/templates  embedded login and admin placeholder pages
+Makefile                    build, cross-compile, quality gates, reserved docker/release targets
 ```
 
 ## Tests
 
 ```sh
-go test ./...
+make test        # or: go test ./...
+make test-race   # needs cgo and gcc
 ```
 
 ## License

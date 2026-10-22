@@ -36,6 +36,8 @@ go.work.sum
 
 # Build output
 /authdock
+/bin/
+/dist/
 
 # Editor/IDE
 # .idea/
