@@ -2,20 +2,23 @@
 // hashing for storage, constant-time verification, and the random bootstrap
 // password handed out with the default administrator account.
 //
-// The hash encoding itself is delegated to github.com/alexedwards/argon2id, a
-// small, audited wrapper around golang.org/x/crypto/argon2. This package only
-// adds AuthDock's policy on top: a password length cap, cost parameter bounds
-// (so a corrupted hash cannot make verification allocate unbounded memory) and
-// the username rules.
+// The key derivation itself comes from golang.org/x/crypto/argon2, the Go
+// project's implementation of Argon2. The PHC string around it
+// ($argon2id$v=19$m=...,t=...,p=...$salt$key, the format of the Argon2 reference
+// implementation) is small and stable enough to encode and parse here, which
+// keeps the module dependency list down to the SQLite driver.
 package passwd
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
-	"github.com/alexedwards/argon2id"
+	"golang.org/x/crypto/argon2"
 )
 
 const (
@@ -52,7 +55,13 @@ var (
 // Params are the Argon2id cost parameters used to derive new hashes. They are
 // stored inside every hash string, so verification keeps working after the
 // defaults are tuned.
-type Params = argon2id.Params
+type Params struct {
+	Memory      uint32 // memory cost in KiB
+	Iterations  uint32 // number of passes
+	Parallelism uint8  // number of lanes
+	SaltLength  uint32 // salt length in bytes
+	KeyLength   uint32 // derived key length in bytes
+}
 
 // DefaultParams returns the parameters new hashes are created with: 64 MiB of
 // memory, 3 passes over 2 lanes. Login is an infrequent admin action, so the
@@ -68,28 +77,28 @@ func DefaultParams() Params {
 }
 
 // validateCost bounds the cost parameters that are read back from a stored hash.
-func validateCost(params Params) error {
+func (p Params) validateCost() error {
 	switch {
-	case params.Memory < 8*1024 || params.Memory > maxArgonMemory:
-		return fmt.Errorf("memory cost out of range: %d KiB", params.Memory)
-	case params.Iterations < 1 || params.Iterations > 64:
-		return fmt.Errorf("iteration count out of range: %d", params.Iterations)
-	case params.Parallelism < 1 || params.Parallelism > 32:
-		return fmt.Errorf("parallelism out of range: %d", params.Parallelism)
+	case p.Memory < 8*1024 || p.Memory > maxArgonMemory:
+		return fmt.Errorf("memory cost out of range: %d KiB", p.Memory)
+	case p.Iterations < 1 || p.Iterations > 64:
+		return fmt.Errorf("iteration count out of range: %d", p.Iterations)
+	case p.Parallelism < 1 || p.Parallelism > 32:
+		return fmt.Errorf("parallelism out of range: %d", p.Parallelism)
 	}
 	return nil
 }
 
 // validateParams checks a full parameter set used to derive new hashes.
-func validateParams(params Params) error {
-	if err := validateCost(params); err != nil {
+func (p Params) validateParams() error {
+	if err := p.validateCost(); err != nil {
 		return fmt.Errorf("passwd: %w", err)
 	}
 	switch {
-	case params.SaltLength < 8 || params.SaltLength > 64:
-		return fmt.Errorf("passwd: salt length out of range: %d", params.SaltLength)
-	case params.KeyLength < 16 || params.KeyLength > 64:
-		return fmt.Errorf("passwd: key length out of range: %d", params.KeyLength)
+	case p.SaltLength < 8 || p.SaltLength > 64:
+		return fmt.Errorf("passwd: salt length out of range: %d", p.SaltLength)
+	case p.KeyLength < 16 || p.KeyLength > 64:
+		return fmt.Errorf("passwd: key length out of range: %d", p.KeyLength)
 	}
 	return nil
 }
@@ -101,7 +110,7 @@ type Hasher struct {
 
 // NewHasher returns a Hasher using the given cost parameters.
 func NewHasher(params Params) (*Hasher, error) {
-	if err := validateParams(params); err != nil {
+	if err := params.validateParams(); err != nil {
 		return nil, err
 	}
 	return &Hasher{params: params}, nil
@@ -129,11 +138,13 @@ func (h *Hasher) Hash(password string) (string, error) {
 	if password == "" || len(password) > MaxPasswordLen {
 		return "", ErrInvalidPassword
 	}
-	hash, err := argon2id.CreateHash(password, &h.params)
-	if err != nil {
-		return "", fmt.Errorf("passwd: hash password: %w", err)
+
+	salt := make([]byte, h.params.SaltLength)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("passwd: read salt: %w", err)
 	}
-	return hash, nil
+	key := argon2.IDKey([]byte(password), salt, h.params.Iterations, h.params.Memory, h.params.Parallelism, h.params.KeyLength)
+	return encode(h.params, salt, key), nil
 }
 
 // Verify reports whether password matches encoded. The cost parameters and salt
@@ -143,27 +154,69 @@ func (h *Hasher) Verify(password, encoded string) error {
 		return ErrMismatch
 	}
 
-	// Validate the cost parameters before the library uses them: DecodeHash is
-	// cheap, while the key derivation that follows allocates Memory KiB.
-	params, salt, key, err := argon2id.DecodeHash(encoded)
+	params, salt, key, err := decode(encoded)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidHash, err)
+		return err
 	}
-	if err := validateCost(*params); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidHash, err)
-	}
-	if len(salt) < 8 || len(key) < 16 {
-		return fmt.Errorf("%w: salt or key too short", ErrInvalidHash)
-	}
-
-	match, err := argon2id.ComparePasswordAndHash(password, encoded)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidHash, err)
-	}
-	if !match {
+	got := argon2.IDKey([]byte(password), salt, params.Iterations, params.Memory, params.Parallelism, uint32(len(key)))
+	if subtle.ConstantTimeCompare(got, key) != 1 {
 		return ErrMismatch
 	}
 	return nil
+}
+
+// encode renders the PHC string format of the Argon2 reference implementation.
+func encode(params Params, salt, key []byte) string {
+	return fmt.Sprintf(
+		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version,
+		params.Memory,
+		params.Iterations,
+		params.Parallelism,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key),
+	)
+}
+
+// decode parses a string produced by encode. The cost parameters, the salt and
+// the key length are all validated here, before the caller feeds them into
+// argon2.IDKey, because that call allocates Memory KiB.
+func decode(encoded string) (Params, []byte, []byte, error) {
+	var params Params
+
+	// "", "argon2id", "v=19", "m=...,t=...,p=...", "<salt>", "<key>"
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
+		return params, nil, nil, ErrInvalidHash
+	}
+
+	var version int
+	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
+		return params, nil, nil, fmt.Errorf("%w: malformed version field", ErrInvalidHash)
+	}
+	if version != argon2.Version {
+		return params, nil, nil, fmt.Errorf("%w: unsupported version %d", ErrInvalidHash, version)
+	}
+
+	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &params.Memory, &params.Iterations, &params.Parallelism); err != nil {
+		return params, nil, nil, fmt.Errorf("%w: malformed cost field", ErrInvalidHash)
+	}
+	if err := params.validateCost(); err != nil {
+		return params, nil, nil, fmt.Errorf("%w: %v", ErrInvalidHash, err)
+	}
+
+	salt, err := base64.RawStdEncoding.Strict().DecodeString(parts[4])
+	if err != nil || len(salt) < 8 {
+		return params, nil, nil, fmt.Errorf("%w: malformed salt", ErrInvalidHash)
+	}
+	key, err := base64.RawStdEncoding.Strict().DecodeString(parts[5])
+	if err != nil || len(key) < 16 {
+		return params, nil, nil, fmt.Errorf("%w: malformed key", ErrInvalidHash)
+	}
+
+	params.SaltLength = uint32(len(salt))
+	params.KeyLength = uint32(len(key))
+	return params, salt, key, nil
 }
 
 // ValidateUsername enforces the username rules shared by the bootstrap account,

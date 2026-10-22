@@ -83,10 +83,11 @@ CREATE TABLE users (
 
 Roles are `user` and `admin`; only `admin` accounts may sign in to the
 management area. Passwords are stored as Argon2id hashes in PHC string form
-(`$argon2id$v=19$m=65536,t=3,p=2$...`) using
-[alexedwards/argon2id](https://github.com/alexedwards/argon2id); the cost
-parameters are read back from each hash, so they can be raised later without
-breaking existing rows.
+(`$argon2id$v=19$m=65536,t=3,p=2$...`). Key derivation uses
+`golang.org/x/crypto/argon2`; the surrounding PHC encoding lives in
+`internal/passwd` and is pinned by a golden-vector test. The cost parameters are
+read back from each hash, so they can be raised later without breaking existing
+rows.
 
 The database file and its `-wal` / `-shm` sidecars are created with `0600`
 permissions because they contain password hashes.
