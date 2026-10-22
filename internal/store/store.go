@@ -28,28 +28,7 @@ const (
 	// BootstrapAdminUsername is the account created the first time AuthDock
 	// starts against an empty users table.
 	BootstrapAdminUsername = "admin"
-
-	// schemaVersion is tracked in PRAGMA user_version.
-	schemaVersion = 1
 )
-
-// Schema is applied idempotently on every start-up.
-//
-// Roles are restricted at the database level, usernames are capped at 20
-// characters (SQLite length() counts characters, matching rune counting in the
-// passwd package) and password hashes are stored as Argon2id PHC strings.
-const schema = `
-CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT    NOT NULL UNIQUE,
-    password_hash TEXT    NOT NULL,
-    role          TEXT    NOT NULL DEFAULT 'user',
-    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    CONSTRAINT users_username_len CHECK (length(username) BETWEEN 1 AND 20),
-    CONSTRAINT users_role_valid   CHECK (role IN ('user', 'admin'))
-);
-CREATE INDEX IF NOT EXISTS users_role_idx ON users (role);
-`
 
 var (
 	// ErrUserNotFound reports a lookup that matched no row.
@@ -160,19 +139,41 @@ func restrictDBFiles(path string) error {
 // Close releases the database handle.
 func (s *Store) Close() error { return s.db.Close() }
 
+// migrate applies every migration this build knows about, in order. The last
+// applied version lives in PRAGMA user_version, so new entries in migrations.go
+// are all a schema change needs.
 func (s *Store) migrate(ctx context.Context) error {
 	var version int
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("store: read schema version: %w", err)
 	}
-	if version >= schemaVersion {
-		return nil
+	if version > len(migrations) {
+		return fmt.Errorf("store: database schema version %d is newer than this build (%d): upgrade AuthDock",
+			version, len(migrations))
 	}
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
-		return fmt.Errorf("store: apply schema: %w", err)
+	for i := version; i < len(migrations); i++ {
+		if err := s.applyMigration(ctx, i); err != nil {
+			return err
+		}
 	}
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
-		return fmt.Errorf("store: record schema version: %w", err)
+	return nil
+}
+
+func (s *Store) applyMigration(ctx context.Context, index int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin migration %d: %w", index+1, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, migrations[index]); err != nil {
+		return fmt.Errorf("store: apply migration %d: %w", index+1, err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", index+1)); err != nil {
+		return fmt.Errorf("store: record migration %d: %w", index+1, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit migration %d: %w", index+1, err)
 	}
 	return nil
 }
@@ -365,8 +366,8 @@ func (s *Store) CreateUser(ctx context.Context, username, password, role string)
 	if role != RoleUser && role != RoleAdmin {
 		return nil, fmt.Errorf("store: invalid role %q", role)
 	}
-	if password == "" {
-		return nil, passwd.ErrInvalidPassword
+	if err := passwd.ValidateNewPassword(password); err != nil {
+		return nil, err
 	}
 
 	hash, err := s.hasher.Hash(password)

@@ -126,15 +126,51 @@ Docker images and GitHub releases are reserved for CI. `make help` lists
 still missing (a `Dockerfile` and the workflow files) and exit non-zero, so a
 pipeline cannot silently publish nothing.
 
+## Pages
+
+| Path              | Description                                              |
+| ----------------- | -------------------------------------------------------- |
+| `/login`          | Login page                                               |
+| `/admin/users`    | 用户管理: inline role/password edits, create and delete  |
+| `/admin/gateway`  | 网关设置: one accordion per account with its routing rules |
+| `/admin/settings` | 系统设置: gateway base domain                            |
+| `/healthz`        | Liveness probe (`ok`)                                    |
+
+The management pages are plain HTML plus vanilla JavaScript with inline SVG
+icons, embedded in the binary with `go:embed`, so `go build` still produces a
+single artifact and no Node toolchain is involved. Every asset and API URL is
+relative, so the pages keep working behind a path-prefixing reverse proxy.
+
 ## API
+
+### Authentication
 
 | Method | Path                 | Description                                            |
 | ------ | -------------------- | ------------------------------------------------------ |
 | POST   | `/api/auth/login`    | `{"username":"admin","password":"..."}`, admin only    |
 | POST   | `/api/auth/logout`   | Drops the current session                              |
 | GET    | `/api/auth/session`  | Reports the current session or `401`                   |
-| GET    | `/login`             | Login page                                             |
-| GET    | `/healthz`           | Liveness probe (`ok`)                                  |
+
+### Management (requires an admin session)
+
+| Method | Path                            | Description                                             |
+| ------ | ------------------------------- | ------------------------------------------------------- |
+| GET    | `/api/admin/users`              | List accounts (`self` marks the signed-in one)          |
+| POST   | `/api/admin/users`              | `{"username","password","role"}` create an account      |
+| PATCH  | `/api/admin/users/{id}`         | `{"role"?, "password"?}` change role and/or password    |
+| DELETE | `/api/admin/users/{id}`         | Delete an account and its gateway rules                 |
+| GET    | `/api/admin/gateway`            | Gateway domain plus every account with its rules        |
+| POST   | `/api/admin/gateway/rules`      | `{"user_id","subdomain","path","upstream"}`             |
+| PATCH  | `/api/admin/gateway/rules/{id}` | `{"subdomain","path","upstream"}`                       |
+| DELETE | `/api/admin/gateway/rules/{id}` | Delete a rule                                           |
+| GET    | `/api/admin/settings`           | `{"gateway_domain":"gw.example.net"}`                   |
+| PUT    | `/api/admin/settings`           | `{"gateway_domain":"gw.example.net"}`                   |
+
+Guard rails: a session is re-validated against the database on every management
+call (so a role change or deletion takes effect immediately), the last admin
+cannot be demoted or deleted, and an admin cannot delete the account they are
+signed in with. Demoting your own account succeeds, revokes the session and
+answers `{"logged_out":true}`.
 
 Responses are JSON; failures use a uniform envelope:
 
@@ -144,7 +180,7 @@ Responses are JSON; failures use a uniform envelope:
 
 Error codes: `invalid_request`, `invalid_credentials`, `admin_only`,
 `too_many_attempts`, `unauthenticated`, `method_not_allowed`, `not_found`,
-`internal_error`.
+`username_taken`, `last_admin`, `self_delete`, `internal_error`.
 
 A successful login sets an `authdock_session` cookie (`HttpOnly`,
 `SameSite=Strict`, `Secure` when served over TLS). Sessions live in memory, so
@@ -164,6 +200,26 @@ CREATE TABLE users (
 );
 ```
 
+```sql
+CREATE TABLE settings (
+    key   TEXT PRIMARY KEY,          -- 'gateway_domain'
+    value TEXT NOT NULL
+);
+
+CREATE TABLE gateway_rules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    subdomain  TEXT    NOT NULL,     -- single DNS label or '*'
+    path       TEXT    NOT NULL DEFAULT '*',  -- '*' or an absolute path
+    upstream   TEXT    NOT NULL,     -- http(s) URL, no embedded credentials
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+```
+
+Schema changes are versioned: `PRAGMA user_version` records how many entries of
+`internal/store/migrations.go` have been applied, and an existing database
+upgrades in place on the next start (covered by a migration test).
+
 Roles are `user` and `admin`; only `admin` accounts may sign in to the
 management area. Passwords are stored as Argon2id hashes in PHC string form
 (`$argon2id$v=19$m=65536,t=3,p=2$...`). Key derivation uses
@@ -181,6 +237,11 @@ permissions because they contain password hashes.
 - Failed logins are throttled per username (5 failures → 1 minute lock, `429`).
 - Verification is constant time, and unknown usernames pay the same Argon2id cost
   as wrong passwords, so timing does not reveal which accounts exist.
+- Management endpoints re-check the account and its role in the database on
+  every call, and refuse to remove the last administrator or the signed-in
+  account.
+- Passwords chosen in the admin area must be at least 8 bytes; resets store a
+  fresh Argon2id hash and never return the old one.
 - Responses carry `X-Content-Type-Options`, `X-Frame-Options`,
   `Referrer-Policy` and a restrictive `Content-Security-Policy`.
 
@@ -190,8 +251,9 @@ permissions because they contain password hashes.
 main.go                     wiring: flags, database, HTTP server, one-time banner
 internal/passwd             Argon2id hashing, password generation, username rules
 internal/store              SQLite schema, users table, bootstrap admin seeding
-internal/httpapi            routes, login/logout/session handlers, sessions, limiter
-internal/httpapi/templates  embedded login and admin placeholder pages
+internal/httpapi            routes, auth and admin handlers, sessions, limiter
+internal/httpapi/templates  embedded login page and the three admin pages
+internal/httpapi/static     admin stylesheet and the vanilla-JS page scripts
 Makefile                    build, cross-compile, quality gates, reserved docker/release targets
 ```
 

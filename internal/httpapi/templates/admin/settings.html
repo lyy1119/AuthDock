@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuthDock · 系统设置</title>
+<link rel="stylesheet" href="assets/admin.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="rail" id="rail" aria-label="主导航">
+    <button class="rail-toggle" id="rail-toggle" type="button" title="展开或折叠导航" aria-label="展开或折叠导航">
+      <span data-icon="menu"></span>
+      <span class="label">折叠</span>
+    </button>
+    <a class="rail-link" href="users" title="用户管理">
+      <span data-icon="users"></span>
+      <span class="label">用户管理</span>
+    </a>
+    <a class="rail-link" href="gateway" title="网关设置">
+      <span data-icon="server"></span>
+      <span class="label">网关设置</span>
+    </a>
+    <a class="rail-link" href="settings" aria-current="page" title="系统设置">
+      <span data-icon="gear"></span>
+      <span class="label">系统设置</span>
+    </a>
+  </nav>
+
+  <main class="content">
+    <header class="page-head">
+      <h1>系统设置</h1>
+      <button class="logout" id="logout" type="button" title="退出登录">
+        <span data-icon="logout"></span>
+        <span>退出登录</span>
+      </button>
+    </header>
+
+    <div class="toolbar">
+      <span class="grow"></span>
+    </div>
+
+    <form id="settings-form">
+      <div class="form-row">
+        <label for="gateway-domain">网关域名</label>
+        <input class="field" id="gateway-domain" placeholder="gw.example.net" autocomplete="off">
+      </div>
+      <div class="form-actions">
+        <button class="btn" id="cancel" type="button">取消</button>
+        <button class="btn btn-primary" id="save" type="submit">保存</button>
+      </div>
+      <p class="msg" id="message" role="status"></p>
+    </form>
+  </main>
+</div>
+
+<script src="assets/admin.js" defer></script>
+<script src="assets/settings.js" defer></script>
+</body>
+</html>

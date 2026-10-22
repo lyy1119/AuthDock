@@ -26,6 +26,10 @@ const (
 	// users_username_len constraint in the database schema.
 	MaxUsernameLen = 20
 
+	// MinPasswordLen is the shortest password accepted when an account is
+	// created or its password is reset from the admin area.
+	MinPasswordLen = 8
+
 	// MaxPasswordLen bounds the password length accepted by Hash and Verify so
 	// that a single request cannot force unbounded work.
 	MaxPasswordLen = 1024
@@ -235,6 +239,16 @@ func ValidateUsername(username string) error {
 		default:
 			return fmt.Errorf("%w: unsupported character %q", ErrInvalidUsername, r)
 		}
+	}
+	return nil
+}
+
+// ValidateNewPassword checks a password chosen by an administrator when creating
+// an account or resetting its password.
+func ValidateNewPassword(password string) error {
+	if len(password) < MinPasswordLen || len(password) > MaxPasswordLen {
+		return fmt.Errorf("%w: length must be between %d and %d bytes",
+			ErrInvalidPassword, MinPasswordLen, MaxPasswordLen)
 	}
 	return nil
 }

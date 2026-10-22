@@ -31,9 +31,10 @@ func (c *fakeClock) Now() time.Time          { return c.current }
 func (c *fakeClock) Advance(d time.Duration) { c.current = c.current.Add(d) }
 
 type testEnv struct {
-	handler http.Handler
-	db      *store.Store
-	clock   *fakeClock
+	handler  http.Handler
+	db       *store.Store
+	clock    *fakeClock
+	sessions *SessionStore
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -65,12 +66,14 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	clock := &fakeClock{current: time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)}
+	sessions := NewSessionStore(DefaultSessionTTL)
 	handler := New(Options{
-		Store:  db,
-		Now:    clock.Now,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:    db,
+		Now:      clock.Now,
+		Sessions: sessions,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	return &testEnv{handler: handler, db: db, clock: clock}
+	return &testEnv{handler: handler, db: db, clock: clock, sessions: sessions}
 }
 
 type loginPayload struct {
@@ -399,8 +402,8 @@ func TestLoginPageRedirectsWhenAuthenticated(t *testing.T) {
 		t.Fatalf("status = %d, want 303", rec.Code)
 	}
 	// Relative on purpose: see TestRedirectsStayRelativeUnderAPathPrefix.
-	if location := rec.Header().Get("Location"); location != "./" {
-		t.Fatalf("Location = %q, want ./", location)
+	if location := rec.Header().Get("Location"); location != "admin/users" {
+		t.Fatalf("Location = %q, want admin/users", location)
 	}
 }
 
@@ -446,12 +449,12 @@ func TestRedirectsStayRelativeUnderAPathPrefix(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303", rec.Code)
 	}
-	if location := rec.Header().Get("Location"); location != "./" {
-		t.Fatalf("Location = %q, want ./", location)
+	if location := rec.Header().Get("Location"); location != "admin/users" {
+		t.Fatalf("Location = %q, want admin/users", location)
 	}
 }
 
-func TestIndexShowsPlaceholderForAdmin(t *testing.T) {
+func TestIndexRedirectsAdminToUserManagement(t *testing.T) {
 	env := newTestEnv(t)
 
 	login := doLogin(t, env, testAdminUsername, testAdminPassword)
@@ -461,12 +464,11 @@ func TestIndexShowsPlaceholderForAdmin(t *testing.T) {
 	}
 
 	rec := doRequest(t, env, http.MethodGet, "/", cookie)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rec.Code)
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, testAdminUsername) {
-		t.Fatalf("admin placeholder does not mention the signed-in user: %s", body)
+	if location := rec.Header().Get("Location"); location != "admin/users" {
+		t.Fatalf("Location = %q, want admin/users", location)
 	}
 }
 

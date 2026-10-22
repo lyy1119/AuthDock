@@ -1,24 +1,42 @@
-// Package httpapi exposes the AuthDock HTTP surface: the login page and the
-// admin authentication API.
+// Package httpapi exposes the AuthDock HTTP surface: the login page, the
+// admin-only authentication API and the management pages.
 package httpapi
 
 import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/lyy1119/AuthDock/internal/store"
 )
 
-//go:embed templates/*.html
-var templateFS embed.FS
+//go:embed templates static
+var assetsFS embed.FS
 
 // DefaultSessionTTL is how long an admin stays signed in.
 const DefaultSessionTTL = 12 * time.Hour
+
+// adminPages maps a page URL to its embedded template.
+var adminPages = map[string]string{
+	"/admin/users":    "templates/admin/users.html",
+	"/admin/gateway":  "templates/admin/gateway.html",
+	"/admin/settings": "templates/admin/settings.html",
+}
+
+// adminAssets whitelists the files served under /admin/assets/ with their
+// content types. Anything else is a 404, so the embedded FS is never exposed
+// wholesale.
+var adminAssets = map[string]string{
+	"admin.css":   "text/css; charset=utf-8",
+	"admin.js":    "text/javascript; charset=utf-8",
+	"users.js":    "text/javascript; charset=utf-8",
+	"gateway.js":  "text/javascript; charset=utf-8",
+	"settings.js": "text/javascript; charset=utf-8",
+}
 
 // Options configures New. Store is required; everything else falls back to a
 // sensible default.
@@ -38,7 +56,6 @@ type server struct {
 	now      func() time.Time
 
 	loginPage []byte
-	adminTmpl *template.Template
 }
 
 // New builds the AuthDock handler with all routes mounted.
@@ -67,25 +84,34 @@ func New(opts Options) http.Handler {
 		s.now = time.Now
 	}
 
-	loginPage, err := templateFS.ReadFile("templates/login.html")
+	loginPage, err := assetsFS.ReadFile("templates/login.html")
 	if err != nil {
 		panic("httpapi: read embedded login page: " + err.Error())
 	}
 	s.loginPage = loginPage
 
-	adminTmpl, err := template.ParseFS(templateFS, "templates/admin.html")
-	if err != nil {
-		panic("httpapi: parse embedded admin page: " + err.Error())
-	}
-	s.adminTmpl = adminTmpl
-
 	mux := http.NewServeMux()
+
+	// Authentication.
 	mux.HandleFunc("/api/auth/login", s.onlyMethod(http.MethodPost, s.handleLogin))
 	mux.HandleFunc("/api/auth/logout", s.onlyMethod(http.MethodPost, s.handleLogout))
 	mux.HandleFunc("/api/auth/session", s.onlyMethod(http.MethodGet, s.handleSession))
+
+	// Management API.
+	mux.HandleFunc("/api/admin/users", s.requireAdmin(s.handleAdminUsers))
+	mux.HandleFunc("/api/admin/users/{id}", s.requireAdmin(s.handleAdminUser))
+	mux.HandleFunc("/api/admin/settings", s.requireAdmin(s.handleAdminSettings))
+	mux.HandleFunc("/api/admin/gateway", s.requireAdmin(s.handleAdminGateway))
+	mux.HandleFunc("/api/admin/gateway/rules", s.requireAdmin(s.handleAdminRules))
+	mux.HandleFunc("/api/admin/gateway/rules/{id}", s.requireAdmin(s.handleAdminRule))
+
 	mux.HandleFunc("/api/", s.handleUnknownAPI)
+
+	// Pages.
 	mux.HandleFunc("/healthz", s.onlyMethod(http.MethodGet, s.handleHealth))
 	mux.HandleFunc("/login", s.onlyMethod(http.MethodGet, s.handleLoginPage))
+	mux.HandleFunc("/admin", s.handleAdminRoot)
+	mux.HandleFunc("/admin/", s.handleAdminArea)
 	mux.HandleFunc("/", s.handleIndex)
 
 	return securityHeaders(mux)
@@ -118,9 +144,23 @@ func (s *server) redirectRelative(w http.ResponseWriter, target string) {
 	_, _ = w.Write([]byte("redirecting to " + target + "\n"))
 }
 
+// adminAuthorized reports whether the request holds a session whose account
+// still exists and still has the admin role.
+func (s *server) adminAuthorized(r *http.Request) bool {
+	session, ok := s.currentSession(r)
+	if !ok {
+		return false
+	}
+	user, err := s.store.GetUserByUsername(r.Context(), session.Username)
+	if err != nil {
+		return false
+	}
+	return user.IsAdmin()
+}
+
 func (s *server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.currentSession(r); ok {
-		s.redirectRelative(w, "./")
+	if s.adminAuthorized(r) {
+		s.redirectRelative(w, "admin/users")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -128,29 +168,89 @@ func (s *server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.loginPage)
 }
 
-// handleIndex serves the admin area placeholder. The real admin UI is not
-// designed yet, so this only proves the session works.
+// handleIndex sends visitors to the management area or the login page.
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET")
-		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "该页面只接受 GET 请求")
+		s.methodNotAllowed(w, "GET")
 		return
 	}
-	session, ok := s.currentSession(r)
-	if !ok {
+	if !s.adminAuthorized(r) {
 		s.redirectRelative(w, "login")
 		return
 	}
+	s.redirectRelative(w, "admin/users")
+}
 
+// handleAdminRoot serves the bare /admin path.
+func (s *server) handleAdminRoot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		s.methodNotAllowed(w, "GET")
+		return
+	}
+	if !s.adminAuthorized(r) {
+		s.redirectRelative(w, "login")
+		return
+	}
+	s.redirectRelative(w, "admin/users")
+}
+
+// handleAdminArea serves the management pages and their assets.
+func (s *server) handleAdminArea(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		s.methodNotAllowed(w, "GET")
+		return
+	}
+
+	if name, ok := strings.CutPrefix(r.URL.Path, "/admin/assets/"); ok {
+		s.serveAdminAsset(w, name)
+		return
+	}
+
+	templatePath, isPage := adminPages[r.URL.Path]
+	if !isPage && r.URL.Path != "/admin/" {
+		http.NotFound(w, r)
+		return
+	}
+	if !s.adminAuthorized(r) {
+		s.redirectRelative(w, "../login")
+		return
+	}
+	if r.URL.Path == "/admin/" {
+		s.redirectRelative(w, "users")
+		return
+	}
+
+	data, err := assetsFS.ReadFile(templatePath)
+	if err != nil {
+		s.logger.Error("read admin page", "page", templatePath, "err", err)
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "页面不可用")
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if err := s.adminTmpl.Execute(w, map[string]any{"Username": session.Username}); err != nil {
-		s.logger.Error("render admin page", "err", err)
+	_, _ = w.Write(data)
+}
+
+func (s *server) serveAdminAsset(w http.ResponseWriter, name string) {
+	contentType, ok := adminAssets[name]
+	if !ok {
+		http.NotFound(w, nil)
+		return
 	}
+	data, err := assetsFS.ReadFile("static/" + name)
+	if err != nil {
+		http.NotFound(w, nil)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	// no-cache revalidates on every load: a stale script after an upgrade would
+	// otherwise keep calling endpoints that no longer exist.
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -220,9 +320,9 @@ func (s *server) writeError(w http.ResponseWriter, status int, code, message str
 
 // securityHeaders applies conservative defaults to every response.
 //
-// The login page uses an inline script and stylesheet, so the policy allows
-// 'unsafe-inline' for scripts and styles. The page reflects no request data and
-// the app is meant to be self-hosted on a trusted origin.
+// Pages use inline scripts and stylesheets, so the policy allows
+// 'unsafe-inline' for scripts and styles. Pages reflect no request data and the
+// app is meant to be self-hosted on a trusted origin.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
