@@ -34,11 +34,14 @@ type adminUserResponse struct {
 }
 
 type adminGate struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	From      string `json:"from"`
-	ToPrefix  string `json:"to_prefix"`
-	ToSuffix  string `json:"to_suffix"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	From     string `json:"from"`
+	ToPrefix string `json:"to_prefix"`
+	ToSuffix string `json:"to_suffix"`
+	// UserID is null for a gate available to every account.
+	UserID    *int64 `json:"user_id"`
+	Username  string `json:"username"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -123,6 +126,8 @@ func adminGateDTO(gate store.Gate) adminGate {
 		From:      gate.From,
 		ToPrefix:  gate.ToPrefix,
 		ToSuffix:  gate.ToSuffix,
+		UserID:    gate.UserID,
+		Username:  gate.Username,
 		CreatedAt: gate.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 	}
 }
@@ -406,6 +411,7 @@ func (s *server) createAdminGate(w http.ResponseWriter, r *http.Request) {
 		From     string `json:"from"`
 		ToPrefix string `json:"to_prefix"`
 		ToSuffix string `json:"to_suffix"`
+		UserID   *int64 `json:"user_id"`
 	}
 	if !s.decodeAdminJSON(w, r, &body) {
 		return
@@ -415,11 +421,14 @@ func (s *server) createAdminGate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gate, err := s.store.CreateGate(r.Context(), body.Name, body.From, body.ToPrefix, body.ToSuffix)
+	gate, err := s.store.CreateGate(r.Context(), body.Name, body.From, body.ToPrefix, body.ToSuffix, body.UserID)
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrGateExists):
 		s.writeError(w, http.StatusConflict, "gate_exists", "该子域名与路径前缀已被其他网关占用")
+		return
+	case errors.Is(err, store.ErrUserNotFound):
+		s.writeError(w, http.StatusNotFound, "not_found", "指定的用户不存在")
 		return
 	default:
 		s.internalError(w, "create gate", err)
@@ -445,6 +454,7 @@ func (s *server) handleAdminGate(w http.ResponseWriter, r *http.Request) {
 			From     string `json:"from"`
 			ToPrefix string `json:"to_prefix"`
 			ToSuffix string `json:"to_suffix"`
+			UserID   *int64 `json:"user_id"`
 		}
 		if !s.decodeAdminJSON(w, r, &body) {
 			return
@@ -453,13 +463,17 @@ func (s *server) handleAdminGate(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, "invalid_request", message)
 			return
 		}
-		gate, err := s.store.UpdateGate(r.Context(), id, body.Name, body.From, body.ToPrefix, body.ToSuffix)
+		gate, err := s.store.UpdateGate(r.Context(), id, body.Name, body.From, body.ToPrefix, body.ToSuffix, body.UserID)
 		if errors.Is(err, store.ErrGateNotFound) {
 			s.writeError(w, http.StatusNotFound, "not_found", "网关不存在")
 			return
 		}
 		if errors.Is(err, store.ErrGateExists) {
 			s.writeError(w, http.StatusConflict, "gate_exists", "该子域名与路径前缀已被其他网关占用")
+			return
+		}
+		if errors.Is(err, store.ErrUserNotFound) {
+			s.writeError(w, http.StatusNotFound, "not_found", "指定的用户不存在")
 			return
 		}
 		if err != nil {

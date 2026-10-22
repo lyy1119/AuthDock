@@ -28,12 +28,24 @@ var (
 // path prefix in front of the forwarded path, and From the upstream address
 // such as "10.0.0.1:1234" or "http://10.0.0.1:1234".
 type Gate struct {
-	ID        int64
-	Name      string
-	From      string
-	ToPrefix  string
-	ToSuffix  string
+	ID       int64
+	Name     string
+	From     string
+	ToPrefix string
+	ToSuffix string
+	// UserID scopes the gate: nil means every account may use it, a value
+	// restricts it to that account (whose name is in Username).
+	UserID    *int64
+	Username  string
 	CreatedAt time.Time
+}
+
+// ScopeLabel renders the owner for the UI: 全局 or the account name.
+func (g Gate) ScopeLabel() string {
+	if g.UserID == nil || g.Username == "" {
+		return "全局"
+	}
+	return g.Username
 }
 
 // Target renders the public URL of the gate for the given gateway domain.
@@ -140,10 +152,9 @@ func NormalizeGateToSuffix(suffix string) (string, error) {
 	return normalized, nil
 }
 
-// ListGates returns every gate ordered by name.
+// ListGates returns every gate ordered by public route.
 func (s *Store) ListGates(ctx context.Context) ([]Gate, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, "from", to_prefix, to_suffix, created_at FROM gate ORDER BY to_prefix, to_suffix, id`)
+	rows, err := s.db.QueryContext(ctx, gateSelect+` ORDER BY g.user_id IS NOT NULL, g.to_prefix, g.to_suffix, g.id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list gates: %w", err)
 	}
@@ -165,8 +176,7 @@ func (s *Store) ListGates(ctx context.Context) ([]Gate, error) {
 
 // GetGate returns one gate by id.
 func (s *Store) GetGate(ctx context.Context, id int64) (*Gate, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, "from", to_prefix, to_suffix, created_at FROM gate WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, gateSelect+` WHERE g.id = ?`, id)
 
 	gate, err := scanGate(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -178,16 +188,21 @@ func (s *Store) GetGate(ctx context.Context, id int64) (*Gate, error) {
 	return &gate, nil
 }
 
-// CreateGate validates and inserts a gate.
-func (s *Store) CreateGate(ctx context.Context, name, from, toPrefix, toSuffix string) (*Gate, error) {
+// CreateGate validates and inserts a gate. userID nil means the gate is global.
+func (s *Store) CreateGate(ctx context.Context, name, from, toPrefix, toSuffix string, userID *int64) (*Gate, error) {
 	cleanName, cleanFrom, cleanPrefix, cleanSuffix, err := normalizeGateInput(name, from, toPrefix, toSuffix)
 	if err != nil {
 		return nil, err
 	}
+	if userID != nil {
+		if _, err := s.GetUserByID(ctx, *userID); err != nil {
+			return nil, err
+		}
+	}
 
 	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO gate (name, "from", to_prefix, to_suffix) VALUES (?, ?, ?, ?)`,
-		cleanName, cleanFrom, cleanPrefix, cleanSuffix)
+		`INSERT INTO gate (name, "from", to_prefix, to_suffix, user_id) VALUES (?, ?, ?, ?, ?)`,
+		cleanName, cleanFrom, cleanPrefix, cleanSuffix, userID)
 	if err != nil {
 		return nil, wrapGateWriteError(err)
 	}
@@ -199,8 +214,8 @@ func (s *Store) CreateGate(ctx context.Context, name, from, toPrefix, toSuffix s
 	return s.GetGate(ctx, id)
 }
 
-// UpdateGate validates and rewrites a gate.
-func (s *Store) UpdateGate(ctx context.Context, id int64, name, from, toPrefix, toSuffix string) (*Gate, error) {
+// UpdateGate validates and rewrites a gate, including its scope.
+func (s *Store) UpdateGate(ctx context.Context, id int64, name, from, toPrefix, toSuffix string, userID *int64) (*Gate, error) {
 	if _, err := s.GetGate(ctx, id); err != nil {
 		return nil, err
 	}
@@ -208,9 +223,14 @@ func (s *Store) UpdateGate(ctx context.Context, id int64, name, from, toPrefix, 
 	if err != nil {
 		return nil, err
 	}
+	if userID != nil {
+		if _, err := s.GetUserByID(ctx, *userID); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE gate SET name = ?, "from" = ?, to_prefix = ?, to_suffix = ? WHERE id = ?`,
-		cleanName, cleanFrom, cleanPrefix, cleanSuffix, id); err != nil {
+		`UPDATE gate SET name = ?, "from" = ?, to_prefix = ?, to_suffix = ?, user_id = ? WHERE id = ?`,
+		cleanName, cleanFrom, cleanPrefix, cleanSuffix, userID, id); err != nil {
 		return nil, wrapGateWriteError(err)
 	}
 	s.restrictFiles()
@@ -261,16 +281,26 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+const gateSelect = `
+SELECT g.id, g.name, g."from", g.to_prefix, g.to_suffix, g.user_id, COALESCE(u.username, ''), g.created_at
+FROM gate g
+LEFT JOIN users u ON u.id = g.user_id`
+
 func scanGate(row rowScanner) (Gate, error) {
 	var (
 		gate      Gate
+		userID    sql.NullInt64
 		createdAt string
 	)
-	if err := row.Scan(&gate.ID, &gate.Name, &gate.From, &gate.ToPrefix, &gate.ToSuffix, &createdAt); err != nil {
+	if err := row.Scan(&gate.ID, &gate.Name, &gate.From, &gate.ToPrefix, &gate.ToSuffix, &userID, &gate.Username, &createdAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Gate{}, err
 		}
 		return Gate{}, fmt.Errorf("store: scan gate: %w", err)
+	}
+	if userID.Valid {
+		owner := userID.Int64
+		gate.UserID = &owner
 	}
 	if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
 		gate.CreatedAt = t

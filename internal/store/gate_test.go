@@ -120,7 +120,7 @@ func TestGateLifecycle(t *testing.T) {
 	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
 	ctx := context.Background()
 
-	gate, err := db.CreateGate(ctx, "日历", "10.0.0.1:1234", "calendar", "app/")
+	gate, err := db.CreateGate(ctx, "日历", "10.0.0.1:1234", "calendar", "app/", nil)
 	if err != nil {
 		t.Fatalf("CreateGate: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestGateLifecycle(t *testing.T) {
 		t.Fatalf("ListGates = %+v", gates)
 	}
 
-	updated, err := db.UpdateGate(ctx, gate.ID, "新日历", "http://10.0.0.2:8080", "Cal", "/v1")
+	updated, err := db.UpdateGate(ctx, gate.ID, "新日历", "http://10.0.0.2:8080", "Cal", "/v1", nil)
 	if err != nil {
 		t.Fatalf("UpdateGate: %v", err)
 	}
@@ -161,24 +161,24 @@ func TestCreateGateValidationAndConflicts(t *testing.T) {
 	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
 	ctx := context.Background()
 
-	if _, err := db.CreateGate(ctx, "", "10.0.0.1:1234", "calendar", ""); err == nil {
+	if _, err := db.CreateGate(ctx, "", "10.0.0.1:1234", "calendar", "", nil); err == nil {
 		t.Fatal("empty name accepted")
 	}
-	if _, err := db.CreateGate(ctx, "日历", "ftp://10.0.0.1", "calendar", ""); err == nil {
+	if _, err := db.CreateGate(ctx, "日历", "ftp://10.0.0.1", "calendar", "", nil); err == nil {
 		t.Fatal("ftp upstream accepted")
 	}
-	if _, err := db.CreateGate(ctx, "日历", "10.0.0.1:1234", "bad.label", ""); err == nil {
+	if _, err := db.CreateGate(ctx, "日历", "10.0.0.1:1234", "bad.label", "", nil); err == nil {
 		t.Fatal("subdomain with a dot accepted")
 	}
 
-	if _, err := db.CreateGate(ctx, "日历", "10.0.0.1:1234", "calendar", ""); err != nil {
+	if _, err := db.CreateGate(ctx, "日历", "10.0.0.1:1234", "calendar", "", nil); err != nil {
 		t.Fatalf("CreateGate: %v", err)
 	}
-	if _, err := db.CreateGate(ctx, "重复", "10.0.0.2:1234", "calendar", ""); !errors.Is(err, ErrGateExists) {
+	if _, err := db.CreateGate(ctx, "重复", "10.0.0.2:1234", "calendar", "", nil); !errors.Is(err, ErrGateExists) {
 		t.Fatalf("duplicate route = %v, want ErrGateExists", err)
 	}
 	// A different path prefix on the same subdomain is a different route.
-	if _, err := db.CreateGate(ctx, "另一个", "10.0.0.2:1234", "calendar", "app/"); err != nil {
+	if _, err := db.CreateGate(ctx, "另一个", "10.0.0.2:1234", "calendar", "app/", nil); err != nil {
 		t.Fatalf("second route on the same subdomain: %v", err)
 	}
 }
@@ -243,5 +243,64 @@ func TestMigrationDropsGatewayRules(t *testing.T) {
 	}
 	if oldTable != 0 {
 		t.Fatal("gateway_rules still exists after migration")
+	}
+}
+
+func TestGateScope(t *testing.T) {
+	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
+	ctx := context.Background()
+
+	alice, err := db.CreateUser(ctx, "alice", "alicepass1", RoleUser)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	global, err := db.CreateGate(ctx, "全局", "10.0.0.1:1234", "global", "", nil)
+	if err != nil {
+		t.Fatalf("CreateGate(global): %v", err)
+	}
+	if global.UserID != nil || global.ScopeLabel() != "全局" {
+		t.Fatalf("global gate = %+v", global)
+	}
+
+	scoped, err := db.CreateGate(ctx, "爱丽丝", "10.0.0.1:1234", "alice", "", &alice.ID)
+	if err != nil {
+		t.Fatalf("CreateGate(scoped): %v", err)
+	}
+	if scoped.UserID == nil || *scoped.UserID != alice.ID || scoped.Username != "alice" {
+		t.Fatalf("scoped gate = %+v", scoped)
+	}
+	if scoped.ScopeLabel() != "alice" {
+		t.Fatalf("ScopeLabel = %q", scoped.ScopeLabel())
+	}
+
+	// Switching a scoped gate back to global clears the owner.
+	updated, err := db.UpdateGate(ctx, scoped.ID, scoped.Name, scoped.From, scoped.ToPrefix, scoped.ToSuffix, nil)
+	if err != nil {
+		t.Fatalf("UpdateGate(to global): %v", err)
+	}
+	if updated.UserID != nil {
+		t.Fatalf("gate still scoped: %+v", updated)
+	}
+
+	// A gate scoped to a missing account is rejected.
+	missing := int64(9999)
+	if _, err := db.CreateGate(ctx, "x", "10.0.0.1:1234", "ghost", "", &missing); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("gate for an unknown user = %v, want ErrUserNotFound", err)
+	}
+
+	// Deleting the owner removes only its gates.
+	if _, err := db.UpdateGate(ctx, scoped.ID, scoped.Name, scoped.From, scoped.ToPrefix, scoped.ToSuffix, &alice.ID); err != nil {
+		t.Fatalf("UpdateGate(to alice): %v", err)
+	}
+	if err := db.DeleteUser(ctx, alice.ID); err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	gates, err := db.ListGates(ctx)
+	if err != nil {
+		t.Fatalf("ListGates: %v", err)
+	}
+	if len(gates) != 1 || gates[0].ID != global.ID {
+		t.Fatalf("gates after owner deletion = %+v, want only the global gate", gates)
 	}
 }

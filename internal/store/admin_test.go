@@ -95,7 +95,7 @@ func TestDeleteUserLeavesGatesAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	if _, err := db.CreateGate(ctx, "日历", "10.0.0.1:1234", "calendar", ""); err != nil {
+	if _, err := db.CreateGate(ctx, "日历", "10.0.0.1:1234", "calendar", "", nil); err != nil {
 		t.Fatalf("CreateGate: %v", err)
 	}
 	if err := db.DeleteUser(ctx, alice.ID); err != nil {

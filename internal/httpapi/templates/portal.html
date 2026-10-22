@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuthDock · 登录</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #16232b;
+    background: #eef3f7;
+  }
+  main {
+    width: min(100%, 24rem);
+    padding: 1.9rem;
+    background: #fff;
+    border: 1px solid #e0e8ee;
+    border-radius: 14px;
+    box-shadow: 0 12px 32px rgba(16, 35, 47, .08);
+  }
+  .brand { margin: 0 0 .3rem; font-size: 1.35rem; font-weight: 700; letter-spacing: .01em; color: #2f6fa8; }
+  .sub { margin: 0 0 1.6rem; font-size: .85rem; color: #6b7c88; }
+  label { display: block; margin: 0 0 .35rem; font-size: .82rem; font-weight: 600; }
+  input {
+    width: 100%;
+    margin-bottom: 1rem;
+    padding: .65rem .72rem;
+    font: inherit;
+    color: inherit;
+    background: #fff;
+    border: 1px solid #cfdae2;
+    border-radius: 9px;
+  }
+  input:focus { outline: 2px solid rgba(47, 111, 168, .25); border-color: #2f6fa8; }
+  button {
+    width: 100%;
+    padding: .7rem;
+    font: inherit;
+    font-weight: 600;
+    color: #fff;
+    background: #2f6fa8;
+    border: 0;
+    border-radius: 9px;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #245a8a; }
+  button:disabled { opacity: .6; cursor: progress; }
+  button.quiet { color: #47586a; background: #f1f5f9; border: 1px solid #dbe4ec; }
+  button.quiet:hover:not(:disabled) { background: #e7eef5; }
+  .msg { min-height: 1.3rem; margin: .8rem 0 0; font-size: .85rem; color: #b3382c; }
+  .msg.ok { color: #1f7a4d; }
+  .who { margin: 0 0 1.2rem; padding: .9rem 1rem; background: #f4f8fb; border: 1px solid #dbe7f0; border-radius: 10px; font-size: .95rem; }
+  .who strong { color: #16232b; }
+  .role { margin-left: .4rem; padding: .1rem .45rem; font-size: .75rem; color: #245a8a; background: #e4eff8; border-radius: 999px; }
+  .hidden { display: none; }
+  .foot { margin: 1.2rem 0 0; font-size: .78rem; color: #8c9aa6; }
+</style>
+</head>
+<body>
+<main>
+  <h1 class="brand">AuthDock</h1>
+  <p class="sub">使用你的账号登录</p>
+
+  <form id="login-form">
+    <label for="username">用户名</label>
+    <input id="username" name="username" maxlength="20" autocomplete="username" required autofocus>
+    <label for="password">密码</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button id="submit" type="submit">登录</button>
+    <p class="msg" id="message" role="alert"></p>
+  </form>
+
+  <section id="session" class="hidden">
+    <p class="who">已登录：<strong id="session-name"></strong><span class="role" id="session-role"></span></p>
+    <button id="logout" class="quiet" type="button">退出登录</button>
+    <p class="msg ok" id="session-message"></p>
+  </section>
+
+  <p class="foot" id="domain-foot"></p>
+</main>
+<script>
+(function () {
+  'use strict';
+
+  // Relative URLs keep the portal working when it sits behind a reverse proxy.
+  var base = new URL('./', window.location.href);
+  var loginEndpoint = new URL('api/login', base);
+  var sessionEndpoint = new URL('api/session', base);
+  var logoutEndpoint = new URL('api/logout', base);
+
+  var form = document.getElementById('login-form');
+  var message = document.getElementById('message');
+  var submit = document.getElementById('submit');
+  var sessionPanel = document.getElementById('session');
+  var sessionName = document.getElementById('session-name');
+  var sessionRole = document.getElementById('session-role');
+  var sessionMessage = document.getElementById('session-message');
+
+  function roleLabel(role) {
+    return role === 'admin' ? '管理员' : '普通用户';
+  }
+
+  function showSession(user) {
+    sessionName.textContent = user.username;
+    sessionRole.textContent = roleLabel(user.role);
+    form.classList.add('hidden');
+    sessionPanel.classList.remove('hidden');
+  }
+
+  function showLogin() {
+    sessionPanel.classList.add('hidden');
+    form.classList.remove('hidden');
+  }
+
+  async function readSession() {
+    try {
+      var response = await fetch(sessionEndpoint, { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+      if (!response.ok) return;
+      var data = await response.json();
+      if (data && data.ok && data.user) showSession(data.user);
+    } catch (err) {
+      /* Not signed in yet: the form is already visible. */
+    }
+  }
+
+  form.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    message.textContent = '';
+    submit.disabled = true;
+    try {
+      var response = await fetch(loginEndpoint, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('username').value.trim(),
+          password: document.getElementById('password').value
+        })
+      });
+      var data = await response.json().catch(function () { return {}; });
+      if (response.ok && data.ok && data.user) {
+        document.getElementById('password').value = '';
+        showSession(data.user);
+        return;
+      }
+      message.textContent = data.message || ('登录失败（HTTP ' + response.status + '）');
+    } catch (err) {
+      message.textContent = '无法连接服务器，请稍后重试';
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  document.getElementById('logout').addEventListener('click', async function () {
+    try {
+      await fetch(logoutEndpoint, { method: 'POST', credentials: 'same-origin' });
+    } catch (err) {
+      /* Either way the local view returns to the form. */
+    }
+    sessionMessage.textContent = '';
+    message.textContent = '';
+    showLogin();
+  });
+
+  document.getElementById('domain-foot').textContent = '此门户只接受通过网关域名访问：' + window.location.host;
+  readSession();
+})();
+</script>
+</body>
+</html>

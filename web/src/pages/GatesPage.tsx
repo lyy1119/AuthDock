@@ -1,18 +1,31 @@
 import { useCallback, useEffect, useState } from 'react'
 import { CheckOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons'
-import { Alert, App, Button, Form, Input, Modal, Popconfirm, Space, Table, Typography } from 'antd'
+import { Alert, App, Button, Form, Input, Modal, Popconfirm, Select, Space, Table, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 
-import { createGate, deleteGate, listGates, updateGate, type Gate, type GateInput } from '../api'
+import {
+  createGate,
+  deleteGate,
+  listGates,
+  listUsers,
+  updateGate,
+  type AdminUser,
+  type Gate,
+  type GateInput,
+} from '../api'
 
 interface Draft {
   name: string
   from: string
   to_prefix: string
   to_suffix: string
+  user_id: number | null
 }
 
-const EMPTY_DRAFT: Draft = { name: '', from: '', to_prefix: '', to_suffix: '' }
+const EMPTY_DRAFT: Draft = { name: '', from: '', to_prefix: '', to_suffix: '', user_id: null }
+
+/** The scope select uses 0 for "global" because Select values must be unique. */
+const GLOBAL = 0
 
 /**
  * 网关设置: one row per gate. 目标 is the public side
@@ -22,6 +35,7 @@ const EMPTY_DRAFT: Draft = { name: '', from: '', to_prefix: '', to_suffix: '' }
 export default function GatesPage() {
   const { message } = App.useApp()
   const [domain, setDomain] = useState('')
+  const [users, setUsers] = useState<AdminUser[]>([])
   const [gates, setGates] = useState<Gate[]>([])
   const [drafts, setDrafts] = useState<Record<number, Draft>>({})
   const [loading, setLoading] = useState(false)
@@ -33,8 +47,9 @@ export default function GatesPage() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await listGates()
+      const [data, accounts] = await Promise.all([listGates(), listUsers()])
       setDomain(data.gatewayDomain)
+      setUsers(accounts)
       setGates(data.gates)
       setDrafts(
         Object.fromEntries(
@@ -45,6 +60,7 @@ export default function GatesPage() {
               from: gate.from,
               to_prefix: gate.to_prefix,
               to_suffix: gate.to_suffix,
+              user_id: gate.user_id,
             },
           ]),
         ) as Record<number, Draft>,
@@ -95,7 +111,11 @@ export default function GatesPage() {
   const create = async (values: GateInput) => {
     setCreating(true)
     try {
-      await createGate({ ...values, to_suffix: values.to_suffix ?? '' })
+      await createGate({
+        ...values,
+        to_suffix: values.to_suffix ?? '',
+        user_id: values.user_id === GLOBAL || values.user_id === undefined ? null : values.user_id,
+      })
       setCreateOpen(false)
       form.resetFields()
       void message.success(`已添加网关「${values.name}」`)
@@ -164,6 +184,26 @@ export default function GatesPage() {
       ),
     },
     {
+      title: '作用域',
+      key: 'scope',
+      width: 190,
+      render: (_value, gate) => {
+        const current = drafts[gate.id]?.user_id ?? null
+        return (
+          <Select
+            style={{ width: '100%' }}
+            value={current === null ? GLOBAL : current}
+            onChange={(value: number) => patchDraft(gate.id, { user_id: value === GLOBAL ? null : value })}
+            options={[
+              { value: GLOBAL, label: '全局（所有账号）' },
+              ...users.map((user) => ({ value: user.id, label: user.username })),
+            ]}
+            aria-label="作用域"
+          />
+        )
+      },
+    },
+    {
       title: '操作',
       key: 'actions',
       width: 180,
@@ -227,7 +267,7 @@ export default function GatesPage() {
         dataSource={gates}
         loading={loading}
         pagination={false}
-        scroll={{ x: 900 }}
+        scroll={{ x: 1080 }}
         locale={{ emptyText: '还没有网关，点右上角「新增网关」添加一个' }}
       />
 
@@ -278,6 +318,19 @@ export default function GatesPage() {
             rules={[{ max: 255, message: '最多 255 个字符' }, { pattern: /^\S*$/, message: '不能包含空格' }]}
           >
             <Input placeholder="留空表示整个子域名" autoComplete="off" />
+          </Form.Item>
+          <Form.Item
+            name="user_id"
+            label="作用域"
+            extra="全局表示所有账号都能使用；选择某个账号后只有该账号可用"
+            initialValue={GLOBAL}
+          >
+            <Select
+              options={[
+                { value: GLOBAL, label: '全局（所有账号）' },
+                ...users.map((user) => ({ value: user.id, label: user.username })),
+              ]}
+            />
           </Form.Item>
           <Form.Item
             name="from"

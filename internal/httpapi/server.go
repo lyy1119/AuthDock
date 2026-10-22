@@ -18,6 +18,9 @@ import (
 //go:embed templates/login.html
 var loginTemplate string
 
+//go:embed templates/portal.html
+var portalTemplate string
+
 // DefaultSessionTTL is how long an admin stays signed in.
 const DefaultSessionTTL = 12 * time.Hour
 
@@ -29,6 +32,11 @@ type Options struct {
 	Limiter  *AttemptLimiter
 	Logger   *slog.Logger
 	Now      func() time.Time
+
+	// NoDNCheck disables the gateway domain check on the user portal. It exists
+	// for local debugging (the -no-dn-check flag) and must not be used in
+	// production.
+	NoDNCheck bool
 }
 
 type server struct {
@@ -38,36 +46,14 @@ type server struct {
 	logger   *slog.Logger
 	now      func() time.Time
 
-	loginPage []byte
+	loginPage  []byte
+	portalPage []byte
+	noDNCheck  bool
 }
 
-// New builds the AuthDock handler with all routes mounted.
+// New builds the management handler with all admin routes mounted.
 func New(opts Options) http.Handler {
-	if opts.Store == nil {
-		panic("httpapi: Options.Store is required")
-	}
-
-	s := &server{
-		store:    opts.Store,
-		sessions: opts.Sessions,
-		limiter:  opts.Limiter,
-		logger:   opts.Logger,
-		now:      opts.Now,
-	}
-	if s.sessions == nil {
-		s.sessions = NewSessionStore(DefaultSessionTTL)
-	}
-	if s.limiter == nil {
-		s.limiter = NewAttemptLimiter(5, time.Minute, 15*time.Minute)
-	}
-	if s.logger == nil {
-		s.logger = slog.Default()
-	}
-	if s.now == nil {
-		s.now = time.Now
-	}
-
-	s.loginPage = []byte(loginTemplate)
+	s := newServer(opts)
 
 	mux := http.NewServeMux()
 
@@ -94,6 +80,57 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 
 	return securityHeaders(mux)
+}
+
+// NewPortal builds the handler for the user facing portal. It is served on its
+// own address (see -portal-addr) and only answers requests whose Host matches
+// the gateway domain from the system settings.
+func NewPortal(opts Options) http.Handler {
+	s := newServer(opts)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.portalGuard(s.handlePortalPage))
+	mux.HandleFunc("/login", s.portalGuard(s.handlePortalPage))
+	mux.HandleFunc("/api/login", s.portalGuard(s.onlyMethod(http.MethodPost, s.handlePortalLogin)))
+	mux.HandleFunc("/api/logout", s.portalGuard(s.onlyMethod(http.MethodPost, s.handleLogout)))
+	mux.HandleFunc("/api/session", s.portalGuard(s.onlyMethod(http.MethodGet, s.handleSession)))
+	mux.HandleFunc("/api/", s.portalGuard(s.handleUnknownAPI))
+	mux.HandleFunc("/healthz", s.portalGuard(s.onlyMethod(http.MethodGet, s.handleHealth)))
+
+	return securityHeaders(mux)
+}
+
+// newServer builds the shared state of a handler.
+func newServer(opts Options) *server {
+	if opts.Store == nil {
+		panic("httpapi: Options.Store is required")
+	}
+
+	s := &server{
+		store:     opts.Store,
+		sessions:  opts.Sessions,
+		limiter:   opts.Limiter,
+		logger:    opts.Logger,
+		now:       opts.Now,
+		noDNCheck: opts.NoDNCheck,
+	}
+	if s.sessions == nil {
+		s.sessions = NewSessionStore(DefaultSessionTTL)
+	}
+	if s.limiter == nil {
+		s.limiter = NewAttemptLimiter(5, time.Minute, 15*time.Minute)
+	}
+	if s.logger == nil {
+		s.logger = slog.Default()
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+
+	s.loginPage = []byte(loginTemplate)
+	s.portalPage = []byte(portalTemplate)
+
+	return s
 }
 
 // onlyMethod wraps a handler so that a request with another HTTP method is

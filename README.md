@@ -16,16 +16,19 @@ for the management area.
 
 ```sh
 go build -o authdock .
-./authdock -addr 127.0.0.1:8080 -db data/authdock.db
+./authdock -addr 127.0.0.1:8080 -portal-addr 127.0.0.1:8081 -db data/authdock.db
 ```
 
-Then open <http://127.0.0.1:8080/login>. Running `./authdock` with no arguments
-works out of the box; these are the defaults:
+Then open <http://127.0.0.1:8080/login> for the management area and
+<http://gw.example.net:8081/> for the user portal (see below). Running
+`./authdock` with no arguments works out of the box; these are the defaults:
 
 | Flag                    | Default (env)                             | Description                                    |
 | ----------------------- | ----------------------------------------- | ---------------------------------------------- |
-| `-addr`                 | `127.0.0.1:8080` (`AUTH_DOCK_ADDR`)       | HTTP listen address                            |
+| `-addr`                 | `127.0.0.1:8080` (`AUTH_DOCK_ADDR`)       | Management listen address                      |
+| `-portal-addr`          | `127.0.0.1:8081` (`AUTH_DOCK_PORTAL_ADDR`) | User portal listen address                    |
 | `-db`                   | `data/authdock.db` (`AUTH_DOCK_DB`)       | SQLite database file, relative to the CWD      |
+| `-no-dn-check`          | off                                       | Skip the portal domain check (debug only)      |
 | `-version`              |                                           | Print build information and exit               |
 | `-reset-admin-password` |                                           | New random admin password (creates the account if missing), printed once, exit |
 
@@ -140,11 +143,34 @@ Docker images and GitHub releases are reserved for CI. `make help` lists
 still missing (a `Dockerfile` and the workflow files) and exit non-zero, so a
 pipeline cannot silently publish nothing.
 
+## User portal
+
+The portal is the front door for the people the pedestal serves, and it listens
+on its own address (`-portal-addr`, default `127.0.0.1:8081`) so it can be
+published or proxied independently of the management port.
+
+**Hard domain check.** Every portal request must arrive with a `Host` matching
+the gateway domain from the system settings (`系统设置`). A mismatch — or a
+domain that has not been configured yet — drops the TCP connection: no login
+page, no error page, nothing. `X-Forwarded-Host` is honoured so the check keeps
+working behind a reverse proxy.
+
+For local debugging only, `-no-dn-check` disables that check:
+
+```sh
+./authdock -no-dn-check          # portal answers on any Host, even without a domain
+```
+
+The portal accepts any account (`user` or `admin`) and shares the session store
+with the management API, so signing in as an admin there also unlocks `/admin/`,
+while a normal account still gets `403` from the management API.
+
 ## Pages
 
-| Path                | Description                                              |
+| Listener / Path     | Description                                              |
 | ------------------- | -------------------------------------------------------- |
-| `/login`            | Login page (served by the Go handler, no build step)     |
+| `/login`            | Admin login page (served by the Go handler, no build)    |
+| `/` on the portal   | User login page (own port, see below)                    |
 | `/admin/`           | Management app: `#/users`, `#/gates`, `#/settings`       |
 | `/healthz`          | Liveness probe (`ok`)                                    |
 
@@ -164,6 +190,15 @@ is relative, which keeps the app working behind a path-prefixing reverse proxy
 | POST   | `/api/auth/login`    | `{"username":"admin","password":"..."}`, admin only    |
 | POST   | `/api/auth/logout`   | Drops the current session                              |
 | GET    | `/api/auth/session`  | Reports the current session or `401`                   |
+
+### Portal (only reachable through the gateway domain)
+
+| Method | Path          | Description                                              |
+| ------ | ------------- | -------------------------------------------------------- |
+| GET    | `/` `/login`  | User login page                                          |
+| POST   | `/api/login`  | `{"username","password"}`, any role                      |
+| POST   | `/api/logout` | Drops the session                                        |
+| GET    | `/api/session`| Reports the current session                              |
 
 ### Management (requires an admin session)
 
@@ -212,6 +247,7 @@ CREATE TABLE gate (
     "from"     TEXT    NOT NULL,     -- upstream: 10.0.0.1:1234 or http://10.0.0.1:1234
     to_prefix  TEXT    NOT NULL,     -- subdomain label on the gateway domain
     to_suffix  TEXT    NOT NULL DEFAULT '',  -- path prefix before the forwarded path
+    user_id    INTEGER REFERENCES users (id) ON DELETE CASCADE,  -- NULL = global
     created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     UNIQUE (to_prefix, to_suffix)
 );
@@ -225,11 +261,14 @@ a gate with `to_prefix = calendar`, `to_suffix = app/` and
 https://calendar.gw.example.net/app/<rest>   ->   http://10.0.0.1:1234/<rest>
 ```
 
+`user_id` is the scope: `NULL` makes a gate available to every account, a value
+restricts it to that account, and deleting the account removes its gates.
+
 Schema changes are versioned: `PRAGMA user_version` records how many entries of
 `internal/store/migrations.go` have been applied, and an existing database
 upgrades in place on the next start (covered by migration tests). Migration 3
-introduces the `gate` table and drops the earlier per-user `gateway_rules`
-table.
+introduces the `gate` table and drops the earlier `gateway_rules` table;
+migration 4 adds the scope column.
 
 Roles are `user` and `admin`; only `admin` accounts may sign in to the
 management area. Passwords are stored as Argon2id hashes in PHC string form
@@ -251,6 +290,9 @@ permissions because they contain password hashes.
 - Management endpoints re-check the account and its role in the database on
   every call, and refuse to remove the last administrator or the signed-in
   account.
+- The user portal refuses to serve anything unless the request Host matches the
+  configured gateway domain; a mismatch drops the connection instead of
+  returning a page.
 - Passwords chosen in the admin area must be at least 8 bytes; resets store a
   fresh Argon2id hash and never return the old one.
 - Responses carry `X-Content-Type-Options`, `X-Frame-Options`,

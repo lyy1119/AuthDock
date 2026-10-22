@@ -418,6 +418,64 @@ func assetPath(t *testing.T, html string) string {
 	return rest[:end]
 }
 
+func TestAdminGateScope(t *testing.T) {
+	env := newTestEnv(t)
+	cookie := adminCookie(t, env)
+
+	users := jsonUsers(t, doJSON(t, env, http.MethodGet, "/api/admin/users", cookie, nil))
+	aliceID := userIDByName(t, users, testPlainUsername)
+
+	// A gate scoped to alice.
+	scoped := doJSON(t, env, http.MethodPost, "/api/admin/gates", cookie, map[string]any{
+		"name":      "爱丽丝的日历",
+		"from":      "10.0.0.1:1234",
+		"to_prefix": "alice",
+		"to_suffix": "",
+		"user_id":   aliceID,
+	})
+	if scoped.Code != http.StatusCreated {
+		t.Fatalf("create scoped gate = %d, body = %s", scoped.Code, scoped.Body.String())
+	}
+	var scopedBody adminGateResponse
+	if err := json.Unmarshal(scoped.Body.Bytes(), &scopedBody); err != nil {
+		t.Fatalf("decode gate: %v", err)
+	}
+	if scopedBody.Gate.UserID == nil || *scopedBody.Gate.UserID != aliceID || scopedBody.Gate.Username != testPlainUsername {
+		t.Fatalf("scoped gate = %+v", scopedBody.Gate)
+	}
+
+	// The same gate switched back to global (user_id null).
+	global := doJSON(t, env, http.MethodPatch, "/api/admin/gates/"+itoa(scopedBody.Gate.ID), cookie, map[string]any{
+		"name":      "公共日历",
+		"from":      "10.0.0.1:1234",
+		"to_prefix": "alice",
+		"to_suffix": "",
+		"user_id":   nil,
+	})
+	if global.Code != http.StatusOK {
+		t.Fatalf("patch to global = %d, body = %s", global.Code, global.Body.String())
+	}
+	var globalBody adminGateResponse
+	if err := json.Unmarshal(global.Body.Bytes(), &globalBody); err != nil {
+		t.Fatalf("decode gate: %v", err)
+	}
+	if globalBody.Gate.UserID != nil || globalBody.Gate.Username != "" {
+		t.Fatalf("gate is still scoped: %+v", globalBody.Gate)
+	}
+
+	// An unknown owner is rejected.
+	missing := doJSON(t, env, http.MethodPost, "/api/admin/gates", cookie, map[string]any{
+		"name":      "幽灵",
+		"from":      "10.0.0.1:1234",
+		"to_prefix": "ghost",
+		"to_suffix": "",
+		"user_id":   9999,
+	})
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("gate for an unknown user = %d, want 404", missing.Code)
+	}
+}
+
 func TestAdminPages(t *testing.T) {
 	env := newTestEnv(t)
 	cookie := adminCookie(t, env)

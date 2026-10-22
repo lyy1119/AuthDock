@@ -60,6 +60,14 @@ CREATE TABLE IF NOT EXISTS gate (
 CREATE UNIQUE INDEX IF NOT EXISTS gate_route_idx ON gate (to_prefix, to_suffix);
 DROP TABLE IF EXISTS gateway_rules;
 `,
+
+	// 4: gates can be scoped. A NULL user_id means the gate is available to
+	// every account; a set user_id restricts it to that account, and deleting
+	// the account removes its gates.
+	`
+ALTER TABLE gate ADD COLUMN user_id INTEGER REFERENCES users (id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS gate_user_idx ON gate (user_id);
+`,
 }
 
 // schemaVersion is how many migrations this build expects.

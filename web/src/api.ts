@@ -118,6 +118,10 @@ export interface Gate {
   to_prefix: string
   /** Path prefix in front of the forwarded path; may be empty. */
   to_suffix: string
+  /** null means every account may use the gate; a value restricts it. */
+  user_id: number | null
+  /** Owner name when user_id is set, empty for a global gate. */
+  username: string
   created_at: string
 }
 
@@ -126,6 +130,8 @@ export interface GateInput {
   from: string
   to_prefix: string
   to_suffix: string
+  /** null (or omitted) = global, a user id = scoped to that account. */
+  user_id: number | null
 }
 
 export interface GateList {
