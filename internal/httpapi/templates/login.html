@@ -73,6 +73,11 @@
   var message = document.getElementById('message');
   var submit = document.getElementById('submit');
 
+  // Everything is relative to the page URL so the app also works when a reverse
+  // proxy mounts it under a path prefix (code-server: /proxy/<port>/).
+  var baseUrl = new URL('./', window.location.href);
+  var loginEndpoint = new URL('api/auth/login', baseUrl);
+
   form.addEventListener('submit', async function (event) {
     event.preventDefault();
     message.textContent = '';
@@ -86,7 +91,7 @@
 
     submit.disabled = true;
     try {
-      var response = await fetch('/api/auth/login', {
+      var response = await fetch(loginEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
@@ -96,7 +101,7 @@
 
       if (response.ok && data.ok) {
         alert('登录成功');
-        window.location.href = '/';
+        window.location.href = baseUrl.href;
         return;
       }
       message.textContent = data.message || ('登录失败（HTTP ' + response.status + '）');

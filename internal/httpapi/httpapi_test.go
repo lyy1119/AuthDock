@@ -373,10 +373,15 @@ func TestLoginPageIsServed(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want text/html", contentType)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"AuthDock", "/api/auth/login", "alert("} {
+	for _, want := range []string{"AuthDock", "api/auth/login", "alert("} {
 		if !strings.Contains(body, want) {
 			t.Errorf("login page does not contain %q", want)
 		}
+	}
+	// The page must not hard-code an absolute API path: behind a path-prefixed
+	// reverse proxy (code-server's /proxy/<port>/) it has to stay relative.
+	if strings.Contains(body, `'/api/auth/login'`) || strings.Contains(body, `"/api/auth/login"`) {
+		t.Error("login page hard-codes an absolute API path, which breaks under a prefixed reverse proxy")
 	}
 }
 
@@ -393,8 +398,9 @@ func TestLoginPageRedirectsWhenAuthenticated(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303", rec.Code)
 	}
-	if location := rec.Header().Get("Location"); location != "/" {
-		t.Fatalf("Location = %q, want /", location)
+	// Relative on purpose: see TestRedirectsStayRelativeUnderAPathPrefix.
+	if location := rec.Header().Get("Location"); location != "./" {
+		t.Fatalf("Location = %q, want ./", location)
 	}
 }
 
@@ -405,8 +411,43 @@ func TestIndexRedirectsAnonymousVisitor(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303", rec.Code)
 	}
-	if location := rec.Header().Get("Location"); location != "/login" {
-		t.Fatalf("Location = %q, want /login", location)
+	// Relative on purpose: see TestRedirectsStayRelativeUnderAPathPrefix.
+	if location := rec.Header().Get("Location"); location != "login" {
+		t.Fatalf("Location = %q, want login", location)
+	}
+}
+
+// TestRedirectsStayRelativeUnderAPathPrefix covers the code-server port
+// forwarding setup: the browser talks to https://host/proxy/<port>/..., the
+// proxy strips that prefix and forwards a plain "/" to the app. An absolute
+// Location such as "/login" would resolve against the proxy root and 404; a
+// relative reference is resolved by the browser against the prefixed URL.
+func TestRedirectsStayRelativeUnderAPathPrefix(t *testing.T) {
+	env := newTestEnv(t)
+
+	rec := doRequest(t, env, http.MethodGet, "/", nil)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rec.Code)
+	}
+	location := rec.Header().Get("Location")
+	if strings.HasPrefix(location, "/") || strings.HasPrefix(location, "http") {
+		t.Fatalf("Location = %q, want a relative reference so the proxy prefix survives", location)
+	}
+	if location != "login" {
+		t.Fatalf("Location = %q, want login", location)
+	}
+
+	login := doLogin(t, env, testAdminUsername, testAdminPassword)
+	cookie := sessionCookie(t, login)
+	if cookie == nil {
+		t.Fatal("login produced no session cookie")
+	}
+	rec = doRequest(t, env, http.MethodGet, "/login", cookie)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rec.Code)
+	}
+	if location := rec.Header().Get("Location"); location != "./" {
+		t.Fatalf("Location = %q, want ./", location)
 	}
 }
 

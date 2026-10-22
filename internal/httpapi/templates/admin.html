@@ -46,11 +46,13 @@
   <button id="logout" type="button">退出登录</button>
 </main>
 <script>
+  // Relative URLs keep this page working behind a path-prefixed reverse proxy.
+  var baseUrl = new URL('./', window.location.href);
   document.getElementById('logout').addEventListener('click', async function () {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+      await fetch(new URL('api/auth/logout', baseUrl), { method: 'POST', credentials: 'same-origin' });
     } finally {
-      window.location.href = '/login';
+      window.location.href = new URL('login', baseUrl).href;
     }
   });
 </script>

@@ -105,9 +105,22 @@ func (s *server) onlyMethod(method string, next http.HandlerFunc) http.HandlerFu
 	}
 }
 
+// redirectRelative answers with a 303 whose Location is a relative reference.
+// http.Redirect cannot be used here: it resolves relative targets against the
+// request path, which is the path the *server* sees. Reverse proxies that mount
+// the app under a prefix (code-server serves it at /proxy/<port>/, for example)
+// usually strip that prefix, so the browser must resolve the target itself
+// against the URL it actually requested.
+func (s *server) redirectRelative(w http.ResponseWriter, target string) {
+	w.Header().Set("Location", target)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusSeeOther)
+	_, _ = w.Write([]byte("redirecting to " + target + "\n"))
+}
+
 func (s *server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.currentSession(r); ok {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		s.redirectRelative(w, "./")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -129,7 +142,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	session, ok := s.currentSession(r)
 	if !ok {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		s.redirectRelative(w, "login")
 		return
 	}
 

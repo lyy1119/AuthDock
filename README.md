@@ -78,6 +78,27 @@ Common reasons a login fails even though a password was printed somewhere:
 - the admin database was deleted and re-seeded while the old process was still
   running (each seed makes a new password).
 
+### Behind a reverse proxy
+
+The login page builds its URLs from the page location, and the redirects use
+relative `Location` references, so AuthDock also works when a proxy mounts it
+under a path prefix. That is exactly how code-server serves a forwarded port:
+
+```text
+https://<code-server host>/proxy/8080/login   ->   http://127.0.0.1:8080/login
+```
+
+Point the proxy at `http://127.0.0.1:8080`. Two details:
+
+- when the proxy terminates TLS, forward `X-Forwarded-Proto: https` so the
+  session cookie is issued with the `Secure` flag (code-server does this);
+- if the proxy runs in another container or host, start AuthDock with
+  `-addr 0.0.0.0:8080` instead of the loopback default.
+
+Absolute paths such as `/api/auth/login` are deliberately absent: behind a
+prefix they would be requested from the proxy root and answered by it (the
+`405` you get from code-server) instead of reaching AuthDock.
+
 ## Build
 
 Bare `make` only prints help; targets do the work:
