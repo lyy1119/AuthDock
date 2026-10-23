@@ -38,10 +38,20 @@ var gatewayOwnedCookies = map[string]bool{
 	SessionCookieName:       true,
 }
 
-// errUpstreamRedirectLoop reports an upstream that answered with a redirect back
-// to the very address the visitor asked for, which the browser would follow
-// forever.
+// errUpstreamRedirectLoop reports an upstream redirect that cannot end well:
+// either the browser is sent back to the address it just asked for (an endless
+// bounce) or a plain HTTP request is answered with "use HTTPS" for the same
+// address (a loop as well, because the gateway keeps speaking HTTP upstream).
 var errUpstreamRedirectLoop = errors.New("httpapi: upstream redirect loop")
+
+// pageThemeCSS is the shared palette of the gateway's own small pages. It mirrors
+// the portal so the two look like one product in light and dark mode.
+const pageThemeCSS = "body{margin:0;min-height:100vh;display:grid;place-items:center;padding:1.5rem;" +
+	"font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text)}" +
+	":root{--bg:#eef3f7;--card:#fff;--border:#e0e8ee;--text:#16232b;--muted:#6b7c88;--accent:#2f6fa8;--panel:#f4f8fb}" +
+	":root[data-theme='dark']{--bg:#121820;--card:#1a2129;--border:#2a343d;--text:#e7edf3;--muted:#93a3b0;--accent:#5b9bd5;--panel:#172029}" +
+	"@media (prefers-color-scheme: dark){:root[data-theme='auto']{--bg:#121820;--card:#1a2129;--border:#2a343d;" +
+	"--text:#e7edf3;--muted:#93a3b0;--accent:#5b9bd5;--panel:#172029}}"
 
 type gatewayDomainKey struct{}
 
@@ -206,15 +216,14 @@ func (s *server) writeGatePage(w http.ResponseWriter, r *http.Request, status in
 		account = user.Username
 	}
 
-	body := "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" +
+	body := "<!DOCTYPE html><html lang=\"zh-CN\" data-theme=\"" + s.pageTheme(r) + "\"><head><meta charset=\"utf-8\">" +
 		"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
 		"<title>" + html.EscapeString(title) + "</title><style>" +
-		"body{margin:0;min-height:100vh;display:grid;place-items:center;padding:1.5rem;" +
-		"font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#eef3f7;color:#16232b}" +
-		"main{width:min(100%,34rem);padding:1.75rem;background:#fff;border:1px solid #e0e8ee;border-radius:14px}" +
+		pageThemeCSS +
+		"main{width:min(100%,34rem);padding:1.75rem;background:var(--card);border:1px solid var(--border);border-radius:14px}" +
 		"h1{margin:0 0 .5rem;font-size:1.2rem}p{margin:.4rem 0;line-height:1.6}" +
-		".muted{color:#6b7c88;font-size:.9rem}ul{margin:.6rem 0 0;padding-left:1.2rem;line-height:1.8}" +
-		"a{color:#2f6fa8}code{background:#f3f6f9;padding:.1rem .35rem;border-radius:4px}</style></head><body><main>" +
+		".muted{color:var(--muted);font-size:.9rem}ul{margin:.6rem 0 0;padding-left:1.2rem;line-height:1.8}" +
+		"a{color:var(--accent)}code{background:var(--panel);padding:.1rem .35rem;border-radius:4px}</style></head><body><main>" +
 		"<h1>" + html.EscapeString(title) + "</h1>" +
 		"<p>" + html.EscapeString(detail) + "</p>" +
 		"<p class=\"muted\">当前账号：<code>" + html.EscapeString(account) + "</code>　" +
@@ -452,12 +461,14 @@ func (s *server) proxyGate(w http.ResponseWriter, r *http.Request, gate store.Ga
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = upstream.Scheme
 			pr.Out.URL.Host = upstream.Host
-			if hostMode == store.UpstreamHostUpstream {
-				pr.Out.Host = upstream.Host
-			} else {
-				// Preserve the public Host: another Caddy or nginx in front of the
-				// service picks its site block from this header.
+			if hostMode == store.UpstreamHostPreserve {
+				// Opt-in: forward the public Host, for an upstream that picks its
+				// virtual host from this header.
 				pr.Out.Host = requestAuthority(r)
+			} else {
+				// Default: the address we dial. Most application servers validate
+				// the Host they are reached by and reject a foreign one.
+				pr.Out.Host = upstream.Host
 			}
 			// Keep the upstream's own base path, then the forwarded remainder.
 			joined, escaped := joinUpstreamPath(upstream.Path, rest, restEscaped)
@@ -468,7 +479,7 @@ func (s *server) proxyGate(w http.ResponseWriter, r *http.Request, gate store.Ga
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			dropOwnSetCookies(resp)
-			if redirectLoops(resp, publicURL) {
+			if redirectsNowhere(resp, publicURL) {
 				resp.Body.Close()
 				return errUpstreamRedirectLoop
 			}
@@ -498,7 +509,7 @@ func (s *server) upstreamOptions(r *http.Request) (hostMode string, insecure boo
 	if normalized, err := store.NormalizeUpstreamHost(hostMode); err == nil {
 		hostMode = normalized
 	} else {
-		hostMode = store.UpstreamHostPreserve
+		hostMode = store.DefaultUpstreamHost
 	}
 
 	value, err := s.store.Setting(ctx, store.SettingsKeyUpstreamInsecure)
@@ -527,9 +538,14 @@ func (s *server) insecureTransport() http.RoundTripper {
 	return s.transportInsecure
 }
 
-// redirectLoops reports an upstream redirect that points back at the address the
-// visitor requested. Forwarding it would make the browser bounce forever.
-func redirectLoops(resp *http.Response, publicURL string) bool {
+// redirectsNowhere reports a redirect that would loop. Two shapes are caught:
+//
+//   - the target is the address the visitor just asked for, so the browser
+//     bounces straight back into the gateway;
+//   - a plain HTTP request is answered with an HTTPS redirect for the same host
+//     and path, which is an HTTP-only port answering an HTTPS-only service. The
+//     gateway would keep speaking HTTP, so this loops too.
+func redirectsNowhere(resp *http.Response, publicURL string) bool {
 	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
 		return false
 	}
@@ -542,6 +558,13 @@ func redirectLoops(resp *http.Response, publicURL string) bool {
 		return false
 	}
 	resolved := resp.Request.URL.ResolveReference(target)
+	requested := resp.Request.URL
+
+	if resolved.Scheme == "https" && requested.Scheme == "http" &&
+		strings.EqualFold(resolved.Host, requested.Host) &&
+		resolved.EscapedPath() == requested.EscapedPath() {
+		return true
+	}
 
 	public, err := url.Parse(publicURL)
 	if err != nil {
@@ -554,14 +577,13 @@ func redirectLoops(resp *http.Response, publicURL string) bool {
 
 // writeRedirectLoopPage explains the loop instead of letting the browser spin.
 func (s *server) writeRedirectLoopPage(w http.ResponseWriter, r *http.Request, gate store.Gate, publicURL string) {
-	body := "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" +
+	body := "<!DOCTYPE html><html lang=\"zh-CN\" data-theme=\"" + s.pageTheme(r) + "\"><head><meta charset=\"utf-8\">" +
 		"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
 		"<title>上游重定向形成循环</title><style>" +
-		"body{margin:0;min-height:100vh;display:grid;place-items:center;padding:1.5rem;" +
-		"font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#eef3f7;color:#16232b}" +
-		"main{width:min(100%,38rem);padding:1.75rem;background:#fff;border:1px solid #e0e8ee;border-radius:14px}" +
-		"h1{margin:0 0 .6rem;font-size:1.15rem}p,li{line-height:1.7}.muted{color:#6b7c88;font-size:.9rem}" +
-		"code{background:#f3f6f9;padding:.1rem .35rem;border-radius:4px}</style></head><body><main>" +
+		pageThemeCSS +
+		"main{width:min(100%,38rem);padding:1.75rem;background:var(--card);border:1px solid var(--border);border-radius:14px}" +
+		"h1{margin:0 0 .6rem;font-size:1.15rem}p,li{line-height:1.7}.muted{color:var(--muted);font-size:.9rem}" +
+		"code{background:var(--panel);padding:.1rem .35rem;border-radius:4px}</style></head><body><main>" +
 		"<h1>上游把请求重定向回了同一个地址</h1>" +
 		"<p>网关把请求转发给 <code>" + html.EscapeString(gate.From) + "</code> 时，上游返回了一个指向 " +
 		"<code>" + html.EscapeString(publicURL) + "</code> 的重定向，浏览器会一直循环下去。</p>" +

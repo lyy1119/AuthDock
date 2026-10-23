@@ -1,4 +1,4 @@
-import { App as AntApp, ConfigProvider } from 'antd'
+import { App as AntApp, ConfigProvider, theme as antdTheme } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom'
 
@@ -6,6 +6,7 @@ import AppLayout from './Layout'
 import GatesPage from './pages/GatesPage'
 import SettingsPage from './pages/SettingsPage'
 import UsersPage from './pages/UsersPage'
+import { ThemeProvider, useTheme } from './theme'
 
 /**
  * Routes live in the URL hash, so the Go server only ever has to serve this
@@ -13,13 +14,24 @@ import UsersPage from './pages/UsersPage'
  */
 export default function App() {
   return (
+    <ThemeProvider>
+      <ThemedApp />
+    </ThemeProvider>
+  )
+}
+
+function ThemedApp() {
+  const { resolved } = useTheme()
+
+  return (
     <ConfigProvider
       locale={zhCN}
       theme={{
+        algorithm: resolved === 'dark' ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
         token: {
           colorPrimary: '#2f6fa8',
           borderRadius: 8,
-          colorBgLayout: '#f4f7f9',
+          colorBgLayout: resolved === 'dark' ? '#10161c' : '#f4f7f9',
         },
       }}
     >

@@ -222,8 +222,9 @@ published service:
 
 | Setting | Values | Meaning |
 | ------- | ------ | ------- |
-| 上游 Host 传递方式 / `upstream_host` | `preserve` (default), `upstream` | `preserve` forwards the public Host the browser used, which is what a second Caddy or nginx needs to pick its site block; `upstream` sends the upstream address instead. |
+| 上游 Host 传递方式 / `upstream_host` | `upstream` (default), `preserve` | `upstream` sends the address the gateway dials, which is what application servers expect (many validate Host); `preserve` forwards the public Host instead, needed only when the upstream picks its site from a virtual host header (a second Caddy or nginx). |
 | 跳过上游 HTTPS 证书校验 / `upstream_insecure` | off (default), on | Lets the gateway reach an https upstream whose certificate it cannot verify, such as Caddy's `tls internal` CA. |
+| 界面配色 / `theme` | `light` (default), `dark`, `auto` | Colour scheme for the management UI, the login page, the portal and the gateway's own error pages. `auto` follows the operating system. |
 
 Point `from` at the address that already speaks the right protocol: a service
 that only serves HTTPS needs `https://10.0.0.1:443`, a plain HTTP service needs
@@ -325,8 +326,8 @@ is relative, which keeps the app working behind a path-prefixing reverse proxy
 | POST   | `/api/admin/gates`       | `{"name","from","to_prefix","to_suffix"}`                |
 | PATCH  | `/api/admin/gates/{id}`  | Same fields; rewrites one gate                           |
 | DELETE | `/api/admin/gates/{id}`  | Delete a gate                                            |
-| GET    | `/api/admin/settings`    | `{"gateway_domain","upstream_host","upstream_insecure"}` |
-| PUT    | `/api/admin/settings`    | Same three fields; `upstream_host` is `preserve`/`upstream` |
+| GET    | `/api/admin/settings`    | `{"gateway_domain","upstream_host","upstream_insecure","theme"}` |
+| PUT    | `/api/admin/settings`    | Same four fields; `upstream_host` is `upstream`/`preserve`, `theme` is `light`/`dark`/`auto` |
 
 Guard rails: a session is re-validated against the database on every management
 call (so a role change or deletion takes effect immediately), the last admin

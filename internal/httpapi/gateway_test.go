@@ -268,10 +268,10 @@ func TestGatewayRoutesTheSameHostPerUser(t *testing.T) {
 		t.Fatalf("bob upstream path = %q", path)
 	}
 
-	// By default the public Host is preserved, which is what a vhosted upstream
-	// (another Caddy, nginx) needs in order to pick its site.
-	if _, _, host := aliceRecord.last(); host != "calendar."+gatewayDomainName {
-		t.Fatalf("upstream Host = %q, want the preserved public host", host)
+	// By default the upstream address is sent as Host: application servers tend to
+	// validate it, and a public hostname fails those checks.
+	if _, _, host := aliceRecord.last(); !strings.HasPrefix(host, "127.0.0.1:") {
+		t.Fatalf("upstream Host = %q, want the upstream address", host)
 	}
 	aliceRecord.mu.Lock()
 	forwarded := aliceRecord.xfHosts[len(aliceRecord.xfHosts)-1]
@@ -722,19 +722,19 @@ func TestGatewayUpstreamHostMode(t *testing.T) {
 	env.gate(t, "svc", upstream.Listener.Addr().String(), "svc", "", nil)
 	cookie := env.login(t, "alice", alicePassword, "")
 
-	// Default: preserve.
+	// Default: the upstream address.
 	requestAt(env.handler, http.MethodGet, "svc."+gatewayDomainName, "/", cookie, nil)
-	if _, _, host := record.last(); host != "svc."+gatewayDomainName {
-		t.Fatalf("preserve mode sent Host = %q", host)
+	if _, _, host := record.last(); !strings.HasPrefix(host, "127.0.0.1:") {
+		t.Fatalf("default mode sent Host = %q, want the upstream address", host)
 	}
 
-	// Switch to the upstream address.
-	if err := env.db.SetSetting(context.Background(), store.SettingsKeyUpstreamHost, store.UpstreamHostUpstream); err != nil {
+	// Opt-in: preserve the public host.
+	if err := env.db.SetSetting(context.Background(), store.SettingsKeyUpstreamHost, store.UpstreamHostPreserve); err != nil {
 		t.Fatalf("SetSetting: %v", err)
 	}
 	requestAt(env.handler, http.MethodGet, "svc."+gatewayDomainName, "/", cookie, nil)
-	if _, _, host := record.last(); !strings.HasPrefix(host, "127.0.0.1:") {
-		t.Fatalf("upstream mode sent Host = %q, want the upstream address", host)
+	if _, _, host := record.last(); host != "svc."+gatewayDomainName {
+		t.Fatalf("preserve mode sent Host = %q, want the public host", host)
 	}
 }
 
@@ -790,7 +790,8 @@ func TestGatewayDetectsUpstreamRedirectLoop(t *testing.T) {
 		t.Fatalf("redirect loop = %d, want 502 with an explanation", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "重定向回了同一个地址") {
+	if !strings.Contains(body, "上游把请求重定向回了同一个地址") &&
+		!strings.Contains(body, "只提供 HTTPS") {
 		t.Fatalf("the loop page does not explain the problem: %s", body)
 	}
 	if !strings.Contains(body, "https://") {

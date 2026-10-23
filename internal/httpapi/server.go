@@ -6,6 +6,7 @@ import (
 	_ "embed" // for the //go:embed directive below
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -47,8 +48,8 @@ type server struct {
 	logger   *slog.Logger
 	now      func() time.Time
 
-	loginPage  []byte
-	portalPage []byte
+	loginPage  string
+	portalPage string
 	noDNCheck  bool
 
 	// transportInsecure is the lazily built transport for https upstreams whose
@@ -133,8 +134,8 @@ func newServer(opts Options) *server {
 		s.now = time.Now
 	}
 
-	s.loginPage = []byte(loginTemplate)
-	s.portalPage = []byte(portalTemplate)
+	s.loginPage = loginTemplate
+	s.portalPage = portalTemplate
 
 	return s
 }
@@ -185,9 +186,29 @@ func (s *server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		s.redirectRelative(w, "admin/")
 		return
 	}
+	s.writeStandalonePage(w, r, s.loginPage)
+}
+
+// pageTheme resolves the colour scheme for a server rendered page.
+func (s *server) pageTheme(r *http.Request) string {
+	theme, err := s.store.Setting(r.Context(), store.SettingsKeyTheme)
+	if err != nil {
+		return store.DefaultTheme
+	}
+	normalized, err := store.NormalizeTheme(theme)
+	if err != nil {
+		return store.DefaultTheme
+	}
+	return normalized
+}
+
+// writeStandalonePage renders one of the self contained pages with the current
+// colour scheme. "auto" is left to the CSS media query, so the page follows the
+// operating system without any script.
+func (s *server) writeStandalonePage(w http.ResponseWriter, r *http.Request, template string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(s.loginPage)
+	_, _ = io.WriteString(w, strings.ReplaceAll(template, "{{THEME}}", s.pageTheme(r)))
 }
 
 // handleIndex sends visitors to the management area or the login page.

@@ -39,6 +39,8 @@ export default function GatesPage() {
   const [gates, setGates] = useState<Gate[]>([])
   const [drafts, setDrafts] = useState<Record<number, Draft>>({})
   const [loading, setLoading] = useState(false)
+  // Keeps the "no gateway domain" warning from flashing before the first load.
+  const [loaded, setLoaded] = useState(false)
   const [busyId, setBusyId] = useState<number | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -69,6 +71,7 @@ export default function GatesPage() {
       void message.error((error as Error).message)
     } finally {
       setLoading(false)
+      setLoaded(true)
     }
   }, [message])
 
@@ -235,14 +238,14 @@ export default function GatesPage() {
 
   return (
     <div className="page">
-      {domain ? null : (
+      {loaded && !domain ? (
         <Alert
           type="warning"
           showIcon
           message="还没有设置网关域名"
           description="网关域名在「系统设置」里配置，例如 gw.example.net。设置后这里的每条网关才会生成可访问的地址。"
         />
-      )}
+      ) : null}
 
       <div className="page-toolbar">
         <Typography.Text type="secondary">

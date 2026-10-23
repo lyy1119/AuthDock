@@ -1,10 +1,81 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="{{THEME}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AuthDock · 登录</title>
 <style>
+  :root {
+    --bg: #eef3f7;
+    --card: #ffffff;
+    --border: #e0e8ee;
+    --text: #16232b;
+    --muted: #6b7c88;
+    --input-bg: #ffffff;
+    --input-border: #cfdae2;
+    --accent: #2f6fa8;
+    --accent-hover: #245a8a;
+    --accent-ring: rgba(47, 111, 168, .25);
+    --danger: #b3382c;
+    --ok: #1f7a4d;
+    --panel: #f4f8fb;
+    --panel-border: #dbe7f0;
+    --badge-bg: #e4eff8;
+    --badge-text: #245a8a;
+    --quiet-bg: #f1f5f9;
+    --quiet-border: #dbe4ec;
+    --quiet-text: #47586a;
+    --shadow: 0 12px 32px rgba(16, 35, 47, .08);
+  }
+
+  :root[data-theme='dark'] {
+    --bg: #121820;
+    --card: #1a2129;
+    --border: #2a343d;
+    --text: #e7edf3;
+    --muted: #93a3b0;
+    --input-bg: #131a21;
+    --input-border: #39454f;
+    --accent: #5b9bd5;
+    --accent-hover: #7cb2e2;
+    --accent-ring: rgba(91, 155, 213, .3);
+    --danger: #ff8278;
+    --ok: #52c98a;
+    --panel: #172029;
+    --panel-border: #27333d;
+    --badge-bg: #1d2b38;
+    --badge-text: #8fc3e8;
+    --quiet-bg: #1d262e;
+    --quiet-border: #2f3a44;
+    --quiet-text: #c3ced8;
+    --shadow: 0 12px 32px rgba(0, 0, 0, .5);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme='auto'] {
+      --bg: #121820;
+      --card: #1a2129;
+      --border: #2a343d;
+      --text: #e7edf3;
+      --muted: #93a3b0;
+      --input-bg: #131a21;
+      --input-border: #39454f;
+      --accent: #5b9bd5;
+      --accent-hover: #7cb2e2;
+      --accent-ring: rgba(91, 155, 213, .3);
+      --danger: #ff8278;
+      --ok: #52c98a;
+      --panel: #172029;
+      --panel-border: #27333d;
+      --badge-bg: #1d2b38;
+      --badge-text: #8fc3e8;
+      --quiet-bg: #1d262e;
+      --quiet-border: #2f3a44;
+      --quiet-text: #c3ced8;
+      --shadow: 0 12px 32px rgba(0, 0, 0, .5);
+    }
+  }
+
   *, *::before, *::after { box-sizing: border-box; }
   body {
     margin: 0;
@@ -13,19 +84,19 @@
     place-items: center;
     padding: 1.5rem;
     font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    color: #16232b;
-    background: #eef3f7;
+    color: var(--text);
+    background: var(--bg);
   }
   main {
     width: min(100%, 24rem);
     padding: 1.9rem;
-    background: #fff;
-    border: 1px solid #e0e8ee;
+    background: var(--card);
+    border: 1px solid var(--border);
     border-radius: 14px;
-    box-shadow: 0 12px 32px rgba(16, 35, 47, .08);
+    box-shadow: var(--shadow);
   }
-  .brand { margin: 0 0 .3rem; font-size: 1.35rem; font-weight: 700; letter-spacing: .01em; color: #2f6fa8; }
-  .sub { margin: 0 0 1.6rem; font-size: .85rem; color: #6b7c88; }
+  .brand { margin: 0 0 .3rem; font-size: 1.35rem; font-weight: 700; letter-spacing: .01em; color: var(--accent); }
+  .sub { margin: 0 0 1.6rem; font-size: .85rem; color: var(--muted); }
   label { display: block; margin: 0 0 .35rem; font-size: .82rem; font-weight: 600; }
   input {
     width: 100%;
@@ -33,36 +104,36 @@
     padding: .65rem .72rem;
     font: inherit;
     color: inherit;
-    background: #fff;
-    border: 1px solid #cfdae2;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
     border-radius: 9px;
   }
-  input:focus { outline: 2px solid rgba(47, 111, 168, .25); border-color: #2f6fa8; }
+  input:focus { outline: 2px solid var(--accent-ring); border-color: var(--accent); }
   button {
     width: 100%;
     padding: .7rem;
     font: inherit;
     font-weight: 600;
     color: #fff;
-    background: #2f6fa8;
+    background: var(--accent);
     border: 0;
     border-radius: 9px;
     cursor: pointer;
   }
-  button:hover:not(:disabled) { background: #245a8a; }
+  button:hover:not(:disabled) { background: var(--accent-hover); }
   button:disabled { opacity: .6; cursor: progress; }
-  button.quiet { color: #47586a; background: #f1f5f9; border: 1px solid #dbe4ec; }
-  button.quiet:hover:not(:disabled) { background: #e7eef5; }
-  .msg { min-height: 1.3rem; margin: .8rem 0 0; font-size: .85rem; color: #b3382c; }
-  .msg.ok { color: #1f7a4d; }
-  .who { margin: 0 0 1.2rem; padding: .9rem 1rem; background: #f4f8fb; border: 1px solid #dbe7f0; border-radius: 10px; font-size: .95rem; }
-  .who strong { color: #16232b; }
-  .hint { margin: .2rem 0 .3rem; font-size: .9rem; color: #6b7c88; }
+  button.quiet { color: var(--quiet-text); background: var(--quiet-bg); border: 1px solid var(--quiet-border); }
+  button.quiet:hover:not(:disabled) { background: var(--quiet-border); }
+  .msg { min-height: 1.3rem; margin: .8rem 0 0; font-size: .85rem; color: var(--danger); }
+  .msg.ok { color: var(--ok); }
+  .who { margin: 0 0 1.2rem; padding: .9rem 1rem; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; font-size: .95rem; }
+  .who strong { color: var(--text); }
+  .role { margin-left: .4rem; padding: .1rem .45rem; font-size: .75rem; color: var(--badge-text); background: var(--badge-bg); border-radius: 999px; }
+  .hint { margin: .2rem 0 .3rem; font-size: .9rem; color: var(--muted); }
   #address-list { margin: 0 0 1rem; padding-left: 1.2rem; line-height: 1.9; }
-  #address-list a { color: #2f6fa8; word-break: break-all; }
-  .role { margin-left: .4rem; padding: .1rem .45rem; font-size: .75rem; color: #245a8a; background: #e4eff8; border-radius: 999px; }
+  #address-list a { color: var(--accent); word-break: break-all; }
   .hidden { display: none; }
-  .foot { margin: 1.2rem 0 0; font-size: .78rem; color: #8c9aa6; }
+  .foot { margin: 1.2rem 0 0; font-size: .78rem; color: var(--muted); }
 </style>
 </head>
 <body>

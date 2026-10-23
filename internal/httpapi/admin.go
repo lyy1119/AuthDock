@@ -62,6 +62,8 @@ type adminSettings struct {
 	UpstreamHost string `json:"upstream_host"`
 	// UpstreamInsecure skips TLS verification for https upstreams.
 	UpstreamInsecure bool `json:"upstream_insecure"`
+	// Theme is "light", "dark" or "auto".
+	Theme string `json:"theme"`
 }
 
 type adminSettingsResponse struct {
@@ -371,6 +373,12 @@ func (s *server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		theme, err := store.NormalizeTheme(body.Theme)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, "invalid_request", "界面配色只能是 light、dark 或 auto")
+			return
+		}
+
 		ctx := r.Context()
 		insecure := "0"
 		if body.UpstreamInsecure {
@@ -380,6 +388,7 @@ func (s *server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			store.SettingsKeyGatewayDomain:    body.GatewayDomain,
 			store.SettingsKeyUpstreamHost:     hostMode,
 			store.SettingsKeyUpstreamInsecure: insecure,
+			store.SettingsKeyTheme:            theme,
 		} {
 			if err := s.store.SetSetting(ctx, key, value); err != nil {
 				s.internalError(w, "write setting "+key, err)
@@ -389,11 +398,12 @@ func (s *server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 
 		session, _ := s.currentSession(r)
 		s.logger.Info("admin saved settings", "domain", body.GatewayDomain, "upstream_host", hostMode,
-			"upstream_insecure", body.UpstreamInsecure, "by", session.Username)
+			"upstream_insecure", body.UpstreamInsecure, "theme", theme, "by", session.Username)
 		s.writeJSON(w, http.StatusOK, adminSettingsResponse{OK: true, Settings: adminSettings{
 			GatewayDomain:    body.GatewayDomain,
 			UpstreamHost:     hostMode,
 			UpstreamInsecure: body.UpstreamInsecure,
+			Theme:            theme,
 		}})
 
 	default:
@@ -415,16 +425,25 @@ func (s *server) readSettings(r *http.Request) (adminSettings, error) {
 	}
 	hostMode, err = store.NormalizeUpstreamHost(hostMode)
 	if err != nil {
-		hostMode = store.UpstreamHostPreserve
+		hostMode = store.DefaultUpstreamHost
 	}
 	insecure, err := s.store.Setting(ctx, store.SettingsKeyUpstreamInsecure)
 	if err != nil {
 		return adminSettings{}, err
 	}
+	theme, err := s.store.Setting(ctx, store.SettingsKeyTheme)
+	if err != nil {
+		return adminSettings{}, err
+	}
+	theme, err = store.NormalizeTheme(theme)
+	if err != nil {
+		theme = store.DefaultTheme
+	}
 	return adminSettings{
 		GatewayDomain:    domain,
 		UpstreamHost:     hostMode,
 		UpstreamInsecure: insecure == "1",
+		Theme:            theme,
 	}, nil
 }
 

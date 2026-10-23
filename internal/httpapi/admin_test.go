@@ -314,6 +314,30 @@ func TestAdminSettings(t *testing.T) {
 		t.Fatalf("gateway domain not stored: %s", after.Body.String())
 	}
 
+	// The theme round trips and is rejected when unknown.
+	themed := doJSON(t, env, http.MethodPut, "/api/admin/settings", cookie, map[string]any{
+		"gateway_domain": "gw.example.net", "upstream_host": "preserve",
+		"upstream_insecure": true, "theme": "dark",
+	})
+	if themed.Code != http.StatusOK {
+		t.Fatalf("theme update = %d, body = %s", themed.Code, themed.Body.String())
+	}
+	var themedBody adminSettingsResponse
+	if err := json.Unmarshal(themed.Body.Bytes(), &themedBody); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if themedBody.Settings.Theme != "dark" || themedBody.Settings.UpstreamHost != "preserve" || !themedBody.Settings.UpstreamInsecure {
+		t.Fatalf("settings after update = %+v", themedBody.Settings)
+	}
+
+	badTheme := doJSON(t, env, http.MethodPut, "/api/admin/settings", cookie, map[string]any{
+		"gateway_domain": "gw.example.net", "upstream_host": "upstream",
+		"upstream_insecure": false, "theme": "sepia",
+	})
+	if badTheme.Code != http.StatusBadRequest {
+		t.Fatalf("unknown theme = %d, want 400", badTheme.Code)
+	}
+
 	for _, invalid := range []string{"https://gw.example.net", "gw.example.net/path", "gw.example.net:8080"} {
 		rec := doJSON(t, env, http.MethodPut, "/api/admin/settings", cookie, map[string]string{"gateway_domain": invalid})
 		if rec.Code != http.StatusBadRequest {

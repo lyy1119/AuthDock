@@ -22,22 +22,54 @@ const (
 	// SettingsKeyUpstreamInsecure allows https upstreams with a certificate the
 	// gateway cannot verify, such as a Caddy "tls internal" CA.
 	SettingsKeyUpstreamInsecure = "upstream_insecure"
+
+	// SettingsKeyTheme is the colour scheme of the web pages: light, dark or
+	// auto (follow the operating system).
+	SettingsKeyTheme = "theme"
 )
+
+// Accepted values for SettingsKeyTheme.
+const (
+	ThemeLight = "light"
+	ThemeDark  = "dark"
+	ThemeAuto  = "auto"
+)
+
+// DefaultTheme keeps the historical look: pages were light before the setting
+// existed, so an unset row must not flip anybody into dark mode.
+const DefaultTheme = ThemeLight
+
+// NormalizeTheme validates the colour scheme; empty means the default.
+func NormalizeTheme(theme string) (string, error) {
+	switch theme {
+	case "":
+		return DefaultTheme, nil
+	case ThemeLight, ThemeDark, ThemeAuto:
+		return theme, nil
+	}
+	return "", fmt.Errorf("store: unknown theme %q", theme)
+}
 
 // Accepted values for SettingsKeyUpstreamHost.
 const (
-	// UpstreamHostPreserve forwards the public host the browser used, which is
-	// what vhosted upstreams (another Caddy, nginx) need to pick their site.
-	UpstreamHostPreserve = "preserve"
-	// UpstreamHostUpstream forwards the upstream address instead.
+	// UpstreamHostUpstream forwards the upstream address as the Host header,
+	// which is what plain application servers expect.
 	UpstreamHostUpstream = "upstream"
+	// UpstreamHostPreserve forwards the public host the browser used, which is
+	// what vhosted upstreams (another Caddy, nginx) may need to pick their site.
+	UpstreamHostPreserve = "preserve"
 )
 
-// NormalizeUpstreamHost validates the Host header mode; empty means preserve.
+// DefaultUpstreamHost is what an unset setting means. It keeps the historical
+// behaviour: services usually validate the Host they are addressed by, and a
+// public hostname fails those checks.
+const DefaultUpstreamHost = UpstreamHostUpstream
+
+// NormalizeUpstreamHost validates the Host header mode; empty means the default.
 func NormalizeUpstreamHost(mode string) (string, error) {
 	switch mode {
 	case "":
-		return UpstreamHostPreserve, nil
+		return DefaultUpstreamHost, nil
 	case UpstreamHostPreserve, UpstreamHostUpstream:
 		return mode, nil
 	}

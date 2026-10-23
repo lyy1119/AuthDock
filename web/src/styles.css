@@ -1,7 +1,21 @@
-/* AuthDock management UI shell: a quiet blue rail, white surfaces and thin rules. */
+/* AuthDock management UI shell: a quiet rail, thin rules and two palettes. */
 
 :root {
   color-scheme: light;
+  --app-bg: #f4f7f9;
+  --surface: #ffffff;
+  --line: #e4ebf1;
+  --brand: #2f6fa8;
+  --hint: #8c9aa6;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --app-bg: #10161c;
+  --surface: #161d24;
+  --line: #26313a;
+  --brand: #6aa5d8;
+  --hint: #7f8c99;
 }
 
 html,
@@ -13,15 +27,17 @@ body,
 body {
   margin: 0;
   font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  background: #f4f7f9;
+  background: var(--app-bg);
 }
 
 .app-shell {
   min-height: 100vh;
+  background: var(--app-bg);
 }
 
 .app-sider {
-  border-right: 1px solid #e4ebf1;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
 }
 
 .app-sider .ant-layout-sider-children {
@@ -36,7 +52,7 @@ body {
   font-size: 17px;
   font-weight: 700;
   letter-spacing: 0.02em;
-  color: #2f6fa8;
+  color: var(--brand);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -52,8 +68,8 @@ body {
   gap: 12px;
   height: 64px;
   padding: 0 20px;
-  background: #fff;
-  border-bottom: 1px solid #e4ebf1;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
 }
 
 .app-title {
@@ -63,6 +79,7 @@ body {
 
 .app-content {
   padding: 24px;
+  background: var(--app-bg);
 }
 
 .page {
@@ -83,7 +100,7 @@ body {
 
 .cell-hint {
   font-size: 12px;
-  color: #8c9aa6;
+  color: var(--hint);
 }
 
 .gate-target {
@@ -91,7 +108,7 @@ body {
 }
 
 .gate-target .literal {
-  color: #8c9aa6;
+  color: var(--hint);
   font-size: 12px;
 }
 

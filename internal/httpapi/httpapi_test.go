@@ -523,3 +523,25 @@ func TestSessionCookieIsSecureOverTLS(t *testing.T) {
 		t.Fatal("session cookie is not marked Secure on a TLS request")
 	}
 }
+
+// TestLoginPageFollowsTheThemeSetting keeps the standalone page in sync with the
+// colour scheme chosen in the system settings.
+func TestLoginPageFollowsTheThemeSetting(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	if rec := doRequest(t, env, http.MethodGet, "/login", nil); !strings.Contains(rec.Body.String(), `data-theme="light"`) {
+		t.Fatalf("default theme was not applied: %s", rec.Body.String())
+	}
+
+	if err := env.db.SetSetting(ctx, store.SettingsKeyTheme, store.ThemeDark); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	rec := doRequest(t, env, http.MethodGet, "/login", nil)
+	if !strings.Contains(rec.Body.String(), `data-theme="dark"`) {
+		t.Fatalf("dark theme was not applied: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "data-theme='dark'") {
+		t.Fatalf("the page carries no dark palette: %s", rec.Body.String())
+	}
+}

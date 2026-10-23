@@ -105,9 +105,7 @@ func (s *server) handlePortalPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(s.portalPage)
+	s.writeStandalonePage(w, r, s.portalPage)
 }
 
 // handlePortalLogin authenticates any account (user or admin): this is the front

@@ -200,3 +200,29 @@ func TestMigrateFromVersion1(t *testing.T) {
 		t.Fatalf("gate table missing after migration: %v", err)
 	}
 }
+
+func TestNormalizeTheme(t *testing.T) {
+	if got, err := NormalizeTheme(""); err != nil || got != DefaultTheme {
+		t.Fatalf("empty theme = %q, %v; want the default %q", got, err, DefaultTheme)
+	}
+	for _, theme := range []string{ThemeLight, ThemeDark, ThemeAuto} {
+		if got, err := NormalizeTheme(theme); err != nil || got != theme {
+			t.Fatalf("NormalizeTheme(%q) = %q, %v", theme, got, err)
+		}
+	}
+	if _, err := NormalizeTheme("sepia"); err == nil {
+		t.Fatal("an unknown theme was accepted")
+	}
+}
+
+func TestNormalizeUpstreamHostDefaultsToTheUpstreamAddress(t *testing.T) {
+	if got, err := NormalizeUpstreamHost(""); err != nil || got != UpstreamHostUpstream {
+		t.Fatalf("empty upstream host = %q, %v; want %q", got, err, UpstreamHostUpstream)
+	}
+	if got, err := NormalizeUpstreamHost(UpstreamHostPreserve); err != nil || got != UpstreamHostPreserve {
+		t.Fatalf("preserve = %q, %v", got, err)
+	}
+	if _, err := NormalizeUpstreamHost("browser"); err == nil {
+		t.Fatal("an unknown upstream host mode was accepted")
+	}
+}

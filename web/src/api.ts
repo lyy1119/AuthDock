@@ -158,20 +158,25 @@ export function deleteGate(id: number): Promise<{ ok: boolean }> {
 
 // ── settings ─────────────────────────────────────────────────────────────
 
+export type ThemeName = 'light' | 'dark' | 'auto'
+
 export interface Settings {
   gateway_domain: string
   /** Which Host header published services receive. */
   upstream_host: 'preserve' | 'upstream'
   /** Skip TLS verification for https upstreams (internal CA, self signed). */
   upstream_insecure: boolean
+  /** Colour scheme of the web pages. */
+  theme: ThemeName
 }
 
 export async function getSettings(signal?: AbortSignal): Promise<Settings> {
   const data = await request<{ settings?: Partial<Settings> }>('settings', { signal })
   return {
     gateway_domain: data.settings?.gateway_domain ?? '',
-    upstream_host: data.settings?.upstream_host === 'upstream' ? 'upstream' : 'preserve',
+    upstream_host: data.settings?.upstream_host === 'preserve' ? 'preserve' : 'upstream',
     upstream_insecure: data.settings?.upstream_insecure === true,
+    theme: data.settings?.theme === 'dark' || data.settings?.theme === 'auto' ? data.settings.theme : 'light',
   }
 }
 
@@ -182,8 +187,9 @@ export async function saveSettings(input: Settings): Promise<Settings> {
   })
   return {
     gateway_domain: data.settings?.gateway_domain ?? '',
-    upstream_host: data.settings?.upstream_host === 'upstream' ? 'upstream' : 'preserve',
+    upstream_host: data.settings?.upstream_host === 'preserve' ? 'preserve' : 'upstream',
     upstream_insecure: data.settings?.upstream_insecure === true,
+    theme: data.settings?.theme === 'dark' || data.settings?.theme === 'auto' ? data.settings.theme : 'light',
   }
 }
 
