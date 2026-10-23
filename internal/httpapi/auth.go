@@ -31,6 +31,9 @@ type loginResponse struct {
 	OK        bool         `json:"ok"`
 	User      *userPayload `json:"user,omitempty"`
 	ExpiresAt string       `json:"expires_at,omitempty"`
+	// Token is the session token, for clients that cannot keep a cookie (native
+	// apps). Send it back as "Authorization: Bearer <token>".
+	Token string `json:"token,omitempty"`
 }
 
 type sessionResponse struct {
@@ -128,6 +131,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		OK:        true,
 		User:      &userPayload{Username: user.Username, Role: user.Role},
 		ExpiresAt: session.ExpiresAt.UTC().Format(time.RFC3339),
+		Token:     token,
 	})
 }
 
@@ -135,6 +139,9 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(SessionCookieName); err == nil {
 		s.sessions.Delete(ScopeAdmin, cookie.Value)
+	}
+	if token := bearerToken(r); token != "" {
+		s.sessions.Delete(ScopeAdmin, token)
 	}
 	s.clearSessionCookie(w)
 	s.writeJSON(w, http.StatusOK, logoutResponse{OK: true})

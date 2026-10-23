@@ -317,6 +317,34 @@ is relative, which keeps the app working behind a path-prefixing reverse proxy
 | POST   | `/api/logout` | Drops the session                                        |
 | GET    | `/api/session`| Reports the current session                              |
 
+### Native clients (Android, desktop, scripts)
+
+The login responses also carry a bearer token, so a client that cannot keep a
+cookie jar uses plain JSON:
+
+```sh
+# 1. sign in at the portal (apex host)
+curl -X POST https://gw.example.net/api/login \
+     -H 'Content-Type: application/json' \
+     -d '{"username":"alice","password":"..."}'
+# -> {"ok":true,"user":{...},"expires_at":"...","token":"1g8v_W1IbMlML...","addresses":[...]}
+
+# 2. use it for a published service and for the session endpoint
+curl https://calendar.gw.example.net/week -H 'Authorization: Bearer 1g8v_...'
+curl https://gw.example.net/api/session -H 'Authorization: Bearer 1g8v_...'
+
+# 3. revoke it when the user signs out
+curl -X POST https://gw.example.net/api/logout -H 'Authorization: Bearer 1g8v_...'
+```
+
+- The token is the same server side session the browser keeps in its cookie:
+  opaque, stored only as a SHA-256 hash, revoked by `/api/logout`, and valid for
+  the session TTL (12h). There is no refresh token yet.
+- Scopes stay apart: a portal token works at the gateway (`/api/session`,
+  proxied services) but is rejected by `/api/admin/*`, and an admin token from
+  `/api/auth/login` works for the management API but not at the gateway.
+- Cookies are still issued for browsers; a request may use either.
+
 ### Management (requires an admin session)
 
 | Method | Path                     | Description                                              |

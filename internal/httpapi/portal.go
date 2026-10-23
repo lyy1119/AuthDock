@@ -30,6 +30,9 @@ type portalSessionResponse struct {
 	// Addresses lists the published services this account can reach, so the
 	// success panel is useful even without a bounce target.
 	Addresses []string `json:"addresses,omitempty"`
+	// Token is the session token for native clients, which send it back as
+	// "Authorization: Bearer <token>" instead of keeping a cookie.
+	Token string `json:"token,omitempty"`
 }
 
 type portalLoginRequest struct {
@@ -219,6 +222,7 @@ func (s *server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		RedirectTo:       redirectTo,
 		ReturnToRejected: redirectTo == "" && rejected != "",
 		Addresses:        addresses,
+		Token:            token,
 	})
 }
 
@@ -247,6 +251,9 @@ func (s *server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
 		if cookie, err := r.Cookie(name); err == nil {
 			s.sessions.Delete(ScopeGateway, cookie.Value)
 		}
+	}
+	if token := bearerToken(r); token != "" {
+		s.sessions.Delete(ScopeGateway, token)
 	}
 
 	s.clearGatewayCookie(w, r, domain)

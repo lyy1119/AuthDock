@@ -271,14 +271,42 @@ func (s *server) handleUnknownAPI(w http.ResponseWriter, _ *http.Request) {
 	s.writeError(w, http.StatusNotFound, "not_found", "unknown endpoint")
 }
 
-// currentSession resolves the management session. Only the management cookie and
-// the admin scope are accepted: a portal session must never unlock /admin.
-func (s *server) currentSession(r *http.Request) (Session, bool) {
-	cookie, err := r.Cookie(SessionCookieName)
-	if err != nil {
-		return Session{}, false
+// bearerToken returns the token of an "Authorization: Bearer <token>" header.
+// Native clients use this instead of the browser cookie.
+func bearerToken(r *http.Request) string {
+	const prefix = "bearer "
+	header := r.Header.Get("Authorization")
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return ""
 	}
-	return s.sessions.Get(ScopeAdmin, cookie.Value, s.now())
+	return strings.TrimSpace(header[len(prefix):])
+}
+
+// sessionFor resolves a session from one of the cookies or from a bearer token,
+// always within the given scope.
+func (s *server) sessionFor(r *http.Request, scope SessionScope, cookieNames ...string) (Session, bool) {
+	for _, name := range cookieNames {
+		cookie, err := r.Cookie(name)
+		if err != nil {
+			continue
+		}
+		if session, ok := s.sessions.Get(scope, cookie.Value, s.now()); ok {
+			return session, true
+		}
+	}
+	if token := bearerToken(r); token != "" {
+		if session, ok := s.sessions.Get(scope, token, s.now()); ok {
+			return session, true
+		}
+	}
+	return Session{}, false
+}
+
+// currentSession resolves the management session. Only the management cookie
+// (or a management bearer token) and the admin scope are accepted: a portal
+// session must never unlock /admin.
+func (s *server) currentSession(r *http.Request) (Session, bool) {
+	return s.sessionFor(r, ScopeAdmin, SessionCookieName)
 }
 
 func (s *server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {

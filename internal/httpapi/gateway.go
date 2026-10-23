@@ -258,20 +258,11 @@ func chooseGate(candidates []store.Gate, path string, userID int64) (gate *store
 	return nil, "", false, matchedAny
 }
 
-// gatewaySession resolves the gateway session. Only the gateway cookies and the
-// gateway scope are accepted, so an administrator signed in at the management
-// port is still anonymous here.
+// gatewaySession resolves the gateway session from its cookie or from a bearer
+// token, always in the gateway scope, so an administrator signed in at the
+// management port is still anonymous here.
 func (s *server) gatewaySession(r *http.Request) (Session, bool) {
-	for _, name := range []string{gatewayCookieSecureName, gatewayCookiePlainName} {
-		cookie, err := r.Cookie(name)
-		if err != nil {
-			continue
-		}
-		if session, ok := s.sessions.Get(ScopeGateway, cookie.Value, s.now()); ok {
-			return session, true
-		}
-	}
-	return Session{}, false
+	return s.sessionFor(r, ScopeGateway, gatewayCookieSecureName, gatewayCookiePlainName)
 }
 
 func (s *server) setGatewayCookie(w http.ResponseWriter, r *http.Request, domain, token string, expires time.Time) {
