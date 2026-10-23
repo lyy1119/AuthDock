@@ -13,25 +13,30 @@ import (
 	"github.com/lyy1119/AuthDock/internal/store"
 )
 
-// The user portal is the login page end users see. It listens on its own
-// address (-portal-addr) and refuses to serve anything unless the Host it is
-// reached through matches the gateway domain configured in the system settings.
+// The portal is the login page end users see. It is served by the gateway for
+// the apex host, and can also run on its own listener (-portal-addr) for
+// debugging. Either way it refuses to answer unless the Host matches the
+// gateway domain configured in the system settings.
 
 type portalSessionResponse struct {
-	OK        bool         `json:"ok"`
-	User      *userPayload `json:"user,omitempty"`
-	ExpiresAt string       `json:"expires_at,omitempty"`
-	Domain    string       `json:"domain,omitempty"`
+	OK         bool         `json:"ok"`
+	User       *userPayload `json:"user,omitempty"`
+	ExpiresAt  string       `json:"expires_at,omitempty"`
+	Domain     string       `json:"domain,omitempty"`
+	RedirectTo string       `json:"redirect_to,omitempty"`
 }
 
-// portalGuard enforces the gateway domain check before any other handling.
+type portalLoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	// ReturnTo is where the browser should go after a successful login; it is
+	// validated against the gateway domain before it is echoed back.
+	ReturnTo string `json:"return_to"`
+}
+
+// portalGuard enforces the gateway domain check for the portal-only listener.
 func (s *server) portalGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.noDNCheck {
-			next(w, r)
-			return
-		}
-
 		domain, err := s.store.Setting(r.Context(), store.SettingsKeyGatewayDomain)
 		if err != nil {
 			s.logger.Error("read gateway domain", "err", err)
@@ -39,17 +44,18 @@ func (s *server) portalGuard(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		domain = strings.ToLower(strings.TrimSpace(domain))
-		if domain == "" {
-			s.refusePortal(w, r, "the gateway domain is not configured in the system settings")
-			return
-		}
 
-		host := requestHost(r)
-		if host != domain {
-			s.refusePortal(w, r, fmt.Sprintf("host %q does not match the gateway domain %q", host, domain))
-			return
+		if !s.noDNCheck {
+			if domain == "" {
+				s.refusePortal(w, r, "the gateway domain is not configured in the system settings")
+				return
+			}
+			if host := requestHost(r); host != domain {
+				s.refusePortal(w, r, fmt.Sprintf("host %q does not match the gateway domain %q", host, domain))
+				return
+			}
 		}
-		next(w, r)
+		next(w, withGatewayDomain(r, domain))
 	}
 }
 
@@ -69,7 +75,7 @@ func requestHost(r *http.Request) string {
 // refusePortal drops the connection without serving any page. A mismatched Host
 // (or a missing gateway domain) must not reveal the login form at all.
 func (s *server) refusePortal(w http.ResponseWriter, r *http.Request, reason string) {
-	s.logger.Warn("portal refused a connection",
+	s.logger.Warn("gateway refused a connection",
 		"host", requestHost(r), "remote", r.RemoteAddr, "reason", reason)
 
 	if hijacker, ok := w.(http.Hijacker); ok {
@@ -82,8 +88,7 @@ func (s *server) refusePortal(w http.ResponseWriter, r *http.Request, reason str
 	http.Error(w, "connection refused: "+reason, http.StatusMisdirectedRequest)
 }
 
-// handlePortalPage serves the user login page. Only "/" and "/login" are pages;
-// everything else under this handler is a 404.
+// handlePortalPage serves the user login page.
 func (s *server) handlePortalPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -99,16 +104,17 @@ func (s *server) handlePortalPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.portalPage)
 }
 
-// handlePortalLogin authenticates any account (user or admin): this is the
-// front door for the people the SSO pedestal serves, not for its operators.
+// handlePortalLogin authenticates any account (user or admin): this is the front
+// door for the people the pedestal serves, not for its operators.
 func (s *server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxAdminBody)
 
-	var req loginRequest
+	var req portalLoginRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "请求体必须是 JSON，且只包含 username 与 password 字段")
+		s.writeError(w, http.StatusBadRequest, "invalid_request",
+			"请求体必须是 JSON，且只包含 username、password 与可选的 return_to")
 		return
 	}
 
@@ -123,7 +129,7 @@ func (s *server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if message := validateLoginRequest(req); message != "" {
+	if message := validateLoginRequest(loginRequest{Username: req.Username, Password: req.Password}); message != "" {
 		s.writeError(w, http.StatusBadRequest, "invalid_request", message)
 		return
 	}
@@ -157,13 +163,57 @@ func (s *server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "create portal session", err)
 		return
 	}
-	s.setSessionCookie(w, r, token, session.ExpiresAt)
+
+	domain := gatewayDomainFrom(r)
+	s.setGatewayCookie(w, r, domain, token, session.ExpiresAt)
 	s.logger.Info("portal login succeeded", "username", user.Username, "role", user.Role,
 		"remote", r.RemoteAddr)
 
 	s.writeJSON(w, http.StatusOK, portalSessionResponse{
+		OK:         true,
+		User:       &userPayload{Username: user.Username, Role: user.Role},
+		ExpiresAt:  session.ExpiresAt.UTC().Format(time.RFC3339),
+		Domain:     domain,
+		RedirectTo: validateReturnTo(req.ReturnTo, domain),
+	})
+}
+
+// handlePortalLogout drops the gateway session cookie.
+func (s *server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
+	domain := gatewayDomainFrom(r)
+
+	for _, name := range []string{gatewayCookieSecureName, gatewayCookiePlainName} {
+		if cookie, err := r.Cookie(name); err == nil {
+			s.sessions.Delete(cookie.Value)
+		}
+	}
+	if cookie, err := r.Cookie(SessionCookieName); err == nil {
+		s.sessions.Delete(cookie.Value)
+	}
+
+	s.clearGatewayCookie(w, r, domain)
+	s.writeJSON(w, http.StatusOK, adminOKResponse{OK: true})
+}
+
+// handlePortalSession reports the session the portal visitors hold.
+func (s *server) handlePortalSession(w http.ResponseWriter, r *http.Request) {
+	domain := gatewayDomainFrom(r)
+
+	session, ok := s.gatewaySession(r)
+	if !ok {
+		if legacy, legacyOK := s.currentSession(r); legacyOK {
+			session, ok = legacy, true
+		}
+	}
+	if !ok {
+		s.writeError(w, http.StatusUnauthorized, "unauthenticated", "尚未登录或会话已过期")
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, portalSessionResponse{
 		OK:        true,
-		User:      &userPayload{Username: user.Username, Role: user.Role},
+		User:      &userPayload{Username: session.Username, Role: session.Role},
 		ExpiresAt: session.ExpiresAt.UTC().Format(time.RFC3339),
+		Domain:    domain,
 	})
 }

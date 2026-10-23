@@ -16,7 +16,7 @@ for the management area.
 
 ```sh
 go build -o authdock .
-./authdock -addr 127.0.0.1:8080 -portal-addr 127.0.0.1:8081 -db data/authdock.db
+./authdock -addr 127.0.0.1:8080 -gateway-addr 127.0.0.1:8081 -db data/authdock.db
 ```
 
 Then open <http://127.0.0.1:8080/login> for the management area and
@@ -26,7 +26,8 @@ Then open <http://127.0.0.1:8080/login> for the management area and
 | Flag                    | Default (env)                             | Description                                    |
 | ----------------------- | ----------------------------------------- | ---------------------------------------------- |
 | `-addr`                 | `127.0.0.1:8080` (`AUTH_DOCK_ADDR`)       | Management listen address                      |
-| `-portal-addr`          | `127.0.0.1:8081` (`AUTH_DOCK_PORTAL_ADDR`) | User portal listen address                    |
+| `-gateway-addr`         | `127.0.0.1:8081` (`AUTH_DOCK_GATEWAY_ADDR`) | Gateway listen address (portal + services)   |
+| `-portal-addr`          | unset (`AUTH_DOCK_PORTAL_ADDR`)            | Optional extra listener serving only the login portal |
 | `-db`                   | `data/authdock.db` (`AUTH_DOCK_DB`)       | SQLite database file, relative to the CWD      |
 | `-no-dn-check`          | off                                       | Skip the portal domain check (debug only)      |
 | `-version`              |                                           | Print build information and exit               |
@@ -143,34 +144,84 @@ Docker images and GitHub releases are reserved for CI. `make help` lists
 still missing (a `Dockerfile` and the workflow files) and exit non-zero, so a
 pipeline cannot silently publish nothing.
 
-## User portal
+## Gateway
 
-The portal is the front door for the people the pedestal serves, and it listens
-on its own address (`-portal-addr`, default `127.0.0.1:8081`) so it can be
-published or proxied independently of the management port.
+AuthDock's gateway terminates nothing itself: it speaks plain HTTP on
+`-gateway-addr` (default `127.0.0.1:8081`) and expects Caddy (or any reverse
+proxy) to own TLS and forward both the apex host and its subdomains to it.
 
-**Hard domain check.** Every portal request must arrive with a `Host` matching
-the gateway domain from the system settings (`系统设置`). A mismatch — or a
-domain that has not been configured yet — drops the TCP connection: no login
-page, no error page, nothing. `X-Forwarded-Host` is honoured so the check keeps
-working behind a reverse proxy.
-
-For local debugging only, `-no-dn-check` disables that check:
-
-```sh
-./authdock -no-dn-check          # portal answers on any Host, even without a domain
+```caddyfile
+# TLS terminates here; AuthDock sees plain HTTP plus X-Forwarded-Proto.
+gw.example.net, *.gw.example.net {
+	reverse_proxy 127.0.0.1:8081
+}
 ```
 
-The portal accepts any account (`user` or `admin`) and shares the session store
-with the management API, so signing in as an admin there also unlocks `/admin/`,
-while a normal account still gets `403` from the management API.
+A wildcard certificate needs the DNS challenge
+(`tls { dns <provider> ... }`). The management UI keeps listening on
+`127.0.0.1:8080` and should stay private.
+
+**Host routing.** The gateway dispatches on the `Host` header:
+
+| Host                          | Served                                          |
+| ----------------------------- | ----------------------------------------------- |
+| `gw.example.net` (the apex)   | the login portal and `/api/login`, `/api/session` |
+| `<label>.gw.example.net`      | the published service(s) for that label         |
+| anything else                 | refused: the connection is dropped, no page     |
+
+**Per account routing.** Two accounts may publish the same public address and
+still reach different upstreams: the gateway resolves the gate *for the
+signed-in account*.
+
+```text
+alice: calendar.gw.example.net -> 127.0.0.1:9101
+bob:   calendar.gw.example.net -> 127.0.0.1:9102
+```
+
+Resolution order for a request: gates with an exact `<to_prefix>` beat the `*`
+wildcard, an account scoped gate beats a global one, and a longer `<to_suffix>`
+path prefix beats a shorter one. `to_suffix` is stripped before forwarding, so
+`app.gw.example.net/tools/deep` with `to_suffix = tools` reaches the upstream as
+`/deep`.
+
+Answers: the right gate is proxied; an address that exists but belongs to
+another account gets `403`; an address with no gate at all gets `404`; a visitor
+without a session is redirected to the portal
+(`https://gw.example.net/login?return_to=<original URL>`) and `return_to` is
+validated against the gateway domain (no open redirect).
+
+**Cookies.** The session travels in one cookie, and the gateway owns it
+completely:
+
+```http
+Set-Cookie: __Secure-gateway_session=...; Domain=gw.example.net; Path=/;
+            Secure; HttpOnly; SameSite=Lax; Max-Age=43200
+```
+
+- `Domain=` is what makes per-account routing possible: the address
+  `calendar.gw.example.net` must be able to see the session.
+- `__Secure-` (and `Secure`) is used when the request arrived over TLS;
+  a plain HTTP development run falls back to `gateway_session` because browsers
+  discard `__Secure-` cookies that are not sent over TLS.
+- `SameSite=Lax` rather than `Strict`, so a visitor arriving from an external
+  link is not treated as signed out.
+- Only set on login (and cleared on logout), never re-emitted on every response.
+- `__Secure-gateway_session`, `gateway_session` and the management cookie
+  `authdock_session` are **stripped from every request before it goes upstream**
+  and any upstream `Set-Cookie` for those names is dropped, so a published
+  service can neither read nor overwrite the session. Other cookies pass
+  through untouched. Upstream `Location` headers pointing at the upstream host
+  are rewritten to the public address.
+
+Sessions live in SQLite (`sessions` table, only a SHA-256 hash of the token is
+stored), so restarting AuthDock no longer signs everyone out.
 
 ## Pages
 
 | Listener / Path     | Description                                              |
 | ------------------- | -------------------------------------------------------- |
 | `/login`            | Admin login page (served by the Go handler, no build)    |
-| `/` on the portal   | User login page (own port, see below)                    |
+| `/` on the gateway  | User login page (apex host, see below)                   |
 | `/admin/`           | Management app: `#/users`, `#/gates`, `#/settings`       |
 | `/healthz`          | Liveness probe (`ok`)                                    |
 
@@ -262,13 +313,26 @@ https://calendar.gw.example.net/app/<rest>   ->   http://10.0.0.1:1234/<rest>
 ```
 
 `user_id` is the scope: `NULL` makes a gate available to every account, a value
-restricts it to that account, and deleting the account removes its gates.
+restricts it to that account, and deleting the account removes its gates. Routes
+are unique per scope (two accounts may publish the same address), enforced with
+two partial unique indexes.
+
+```sql
+CREATE TABLE sessions (
+    token_hash TEXT PRIMARY KEY,   -- SHA-256 of the cookie token
+    username   TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    expires_at TEXT NOT NULL
+);
+```
 
 Schema changes are versioned: `PRAGMA user_version` records how many entries of
 `internal/store/migrations.go` have been applied, and an existing database
 upgrades in place on the next start (covered by migration tests). Migration 3
 introduces the `gate` table and drops the earlier `gateway_rules` table;
-migration 4 adds the scope column.
+migration 4 adds the scope column and migration 5 adds the session table plus the
+per-scope route indexes.
 
 Roles are `user` and `admin`; only `admin` accounts may sign in to the
 management area. Passwords are stored as Argon2id hashes in PHC string form
@@ -290,9 +354,13 @@ permissions because they contain password hashes.
 - Management endpoints re-check the account and its role in the database on
   every call, and refuse to remove the last administrator or the signed-in
   account.
-- The user portal refuses to serve anything unless the request Host matches the
+- The gateway refuses to serve anything unless the request Host belongs to the
   configured gateway domain; a mismatch drops the connection instead of
-  returning a page.
+  returning a page, and the same check covers the login page and every routed
+  service.
+- Published services never see AuthDock's cookies, and cannot overwrite them.
+- `return_to` is validated against the gateway domain, so the login page cannot
+  be used as an open redirect.
 - Passwords chosen in the admin area must be at least 8 bytes; resets store a
   fresh Argon2id hash and never return the old one.
 - Responses carry `X-Content-Type-Options`, `X-Frame-Options`,

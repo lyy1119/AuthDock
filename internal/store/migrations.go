@@ -68,6 +68,26 @@ DROP TABLE IF EXISTS gateway_rules;
 ALTER TABLE gate ADD COLUMN user_id INTEGER REFERENCES users (id) ON DELETE CASCADE;
 CREATE INDEX IF NOT EXISTS gate_user_idx ON gate (user_id);
 `,
+
+	// 5: sessions move into the database (the gateway must survive a restart
+	// without logging everyone out) and gate routes become unique per scope, so
+	// two accounts may publish the same public address to different upstreams.
+	`
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    username   TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions (expires_at);
+
+DROP INDEX IF EXISTS gate_route_idx;
+CREATE UNIQUE INDEX IF NOT EXISTS gate_scope_idx
+    ON gate (to_prefix, to_suffix, user_id) WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS gate_global_idx
+    ON gate (to_prefix, to_suffix) WHERE user_id IS NULL;
+`,
 }
 
 // schemaVersion is how many migrations this build expects.

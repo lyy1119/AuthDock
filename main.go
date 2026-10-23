@@ -41,8 +41,11 @@ func main() {
 func run() error {
 	addr := flag.String("addr", envOr("AUTH_DOCK_ADDR", "127.0.0.1:8080"), "HTTP listen address")
 	dbPath := flag.String("db", envOr("AUTH_DOCK_DB", "data/authdock.db"), "path to the SQLite database file")
-	portalAddr := flag.String("portal-addr", envOr("AUTH_DOCK_PORTAL_ADDR", "127.0.0.1:8081"),
-		"listen address of the user login portal")
+	gatewayAddr := flag.String("gateway-addr",
+		firstNonEmpty(os.Getenv("AUTH_DOCK_GATEWAY_ADDR"), os.Getenv("AUTH_DOCK_PORTAL_ADDR"), "127.0.0.1:8081"),
+		"HTTP listen address of the gateway (login portal + published services); put Caddy in front for TLS")
+	portalAddr := flag.String("portal-addr", envOr("AUTH_DOCK_PORTAL_ADDR", ""),
+		"optional extra listener that only serves the login portal (empty disables it)")
 	noDNCheck := flag.Bool("no-dn-check", false,
 		"skip the gateway domain check on the user portal (debug only)")
 	showVersion := flag.Bool("version", false, "print version information and exit")
@@ -110,11 +113,11 @@ func run() error {
 			"hint", "run `authdock -reset-admin-password` if that password was lost or never saved")
 	}
 
-	// The management UI and the user portal share one session store, so signing
-	// in at the portal also satisfies the admin API for an admin account.
+	// Sessions live in the database, so a restart no longer signs everybody out.
+	// The gateway and the management UI share the store: one login covers both.
 	options := httpapi.Options{
 		Store:     db,
-		Sessions:  httpapi.NewSessionStore(httpapi.DefaultSessionTTL),
+		Sessions:  httpapi.NewDBSessions(db, httpapi.DefaultSessionTTL),
 		Limiter:   httpapi.NewAttemptLimiter(5, time.Minute, 15*time.Minute),
 		Logger:    logger,
 		NoDNCheck: *noDNCheck,
@@ -128,19 +131,31 @@ func run() error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	portalSrv := &http.Server{
-		Addr:              *portalAddr,
-		Handler:           httpapi.NewPortal(options),
+	gatewaySrv := &http.Server{
+		Addr:              *gatewayAddr,
+		Handler:           httpapi.NewGateway(options),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
+	}
+
+	var portalSrv *http.Server
+	if *portalAddr != "" {
+		portalSrv = &http.Server{
+			Addr:              *portalAddr,
+			Handler:           httpapi.NewPortal(options),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
 	}
 
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	serveErr := make(chan error, 2)
+	serveErr := make(chan error, 3)
 	go func() {
 		logger.Info("AuthDock listening", "version", version, "addr", *addr, "db", dbFile,
 			"login_page", "http://"+*addr+"/login")
@@ -148,16 +163,24 @@ func run() error {
 			serveErr <- fmt.Errorf("admin listener: %w", err)
 		}
 	}()
+	domainCheck := "on"
+	if *noDNCheck {
+		domainCheck = "off (-no-dn-check)"
+	}
 	go func() {
-		domainCheck := "on"
-		if *noDNCheck {
-			domainCheck = "off (-no-dn-check)"
-		}
-		logger.Info("AuthDock portal listening", "addr", *portalAddr, "domain_check", domainCheck)
-		if err := portalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serveErr <- fmt.Errorf("portal listener: %w", err)
+		logger.Info("AuthDock gateway listening", "addr", *gatewayAddr, "domain_check", domainCheck)
+		if err := gatewaySrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- fmt.Errorf("gateway listener: %w", err)
 		}
 	}()
+	if portalSrv != nil {
+		go func() {
+			logger.Info("AuthDock portal listening", "addr", *portalAddr, "domain_check", domainCheck)
+			if err := portalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serveErr <- fmt.Errorf("portal listener: %w", err)
+			}
+		}()
+	}
 
 	select {
 	case err := <-serveErr:
@@ -168,7 +191,11 @@ func run() error {
 	logger.Info("shutting down")
 	stopCtx, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelStop()
-	for _, srv := range []*http.Server{adminSrv, portalSrv} {
+	servers := []*http.Server{adminSrv, gatewaySrv}
+	if portalSrv != nil {
+		servers = append(servers, portalSrv)
+	}
+	for _, srv := range servers {
 		if err := srv.Shutdown(stopCtx); err != nil {
 			return fmt.Errorf("shutdown %s: %w", srv.Addr, err)
 		}
@@ -217,6 +244,16 @@ func printResetBanner(dbFile, username string, created bool, password string) {
 %s
 
 `, bannerRule, headline, username, password, dbFile, bannerRule)
+}
+
+// firstNonEmpty returns the first non-empty value.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func envOr(key, fallback string) string {

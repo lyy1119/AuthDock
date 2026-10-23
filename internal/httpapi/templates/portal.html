@@ -94,6 +94,9 @@
   var sessionEndpoint = new URL('api/session', base);
   var logoutEndpoint = new URL('api/logout', base);
 
+  // Where to go after signing in (set by the gateway when it bounced a request).
+  var returnTo = new URLSearchParams(window.location.search).get('return_to') || '';
+
   var form = document.getElementById('login-form');
   var message = document.getElementById('message');
   var submit = document.getElementById('submit');
@@ -140,12 +143,17 @@
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({
           username: document.getElementById('username').value.trim(),
-          password: document.getElementById('password').value
+          password: document.getElementById('password').value,
+          return_to: returnTo
         })
       });
       var data = await response.json().catch(function () { return {}; });
       if (response.ok && data.ok && data.user) {
         document.getElementById('password').value = '';
+        if (data.redirect_to) {
+          window.location.href = data.redirect_to;
+          return;
+        }
         showSession(data.user);
         return;
       }
@@ -169,6 +177,9 @@
   });
 
   document.getElementById('domain-foot').textContent = '此门户只接受通过网关域名访问：' + window.location.host;
+  if (returnTo) {
+    document.getElementById('login-form');
+  }
   readSession();
 })();
 </script>

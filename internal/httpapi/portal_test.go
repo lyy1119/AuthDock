@@ -72,6 +72,20 @@ func newPortalEnv(t *testing.T, withDomain bool, noDNCheck bool) *portalEnv {
 	return &portalEnv{handler: NewPortal(options), admin: New(options), db: db, clock: clock}
 }
 
+// gatewayCookie finds the session cookie the portal issues.
+func gatewayCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Value == "" {
+			continue
+		}
+		if cookie.Name == gatewayCookieSecureName || cookie.Name == gatewayCookiePlainName {
+			return cookie
+		}
+	}
+	return nil
+}
+
 // portalRequest performs a request with an explicit Host header.
 func portalRequest(t *testing.T, env *portalEnv, method, path, host string, body any) *httptest.ResponseRecorder {
 	t.Helper()
@@ -190,9 +204,15 @@ func TestPortalLoginAcceptsNormalUser(t *testing.T) {
 	if user["username"] != "alice" || user["role"] != store.RoleUser {
 		t.Fatalf("user = %v", user)
 	}
-	cookie := sessionCookie(t, rec)
+	cookie := gatewayCookie(t, rec)
 	if cookie == nil {
 		t.Fatal("portal login produced no session cookie")
+	}
+	if cookie.Domain != portalDomain {
+		t.Fatalf("cookie domain = %q, want %q so subdomains can see the session", cookie.Domain, portalDomain)
+	}
+	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/" {
+		t.Fatalf("unexpected cookie attributes: %+v", cookie)
 	}
 
 	// The session is valid at the portal but carries no admin rights.
@@ -230,7 +250,7 @@ func TestPortalLoginRejectsBadCredentials(t *testing.T) {
 		if rec.Code != want {
 			t.Fatalf("%s = %d, want %d", name, rec.Code, want)
 		}
-		if cookie := sessionCookie(t, rec); cookie != nil {
+		if cookie := gatewayCookie(t, rec); cookie != nil {
 			t.Fatalf("%s handed out a session cookie", name)
 		}
 	}
@@ -242,7 +262,7 @@ func TestPortalLogout(t *testing.T) {
 	login := portalRequest(t, env, http.MethodPost, "/api/login", portalDomain, map[string]string{
 		"username": "boss", "password": "bosspass12",
 	})
-	cookie := sessionCookie(t, login)
+	cookie := gatewayCookie(t, login)
 	if cookie == nil {
 		t.Fatal("login produced no session cookie")
 	}

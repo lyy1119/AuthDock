@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -38,6 +39,32 @@ type Gate struct {
 	UserID    *int64
 	Username  string
 	CreatedAt time.Time
+}
+
+// RoutePrefix is the public path prefix of the gate, empty for the subdomain
+// root and for the "*" wildcard.
+func (g Gate) RoutePrefix() string {
+	if g.ToSuffix == "" || g.ToSuffix == "*" {
+		return ""
+	}
+	return "/" + strings.Trim(g.ToSuffix, "/")
+}
+
+// MatchPath reports whether path belongs to the gate and returns the path that
+// has to be forwarded upstream: the public prefix is stripped, exactly as the
+// gateway page describes it.
+func (g Gate) MatchPath(path string) (string, bool) {
+	prefix := g.RoutePrefix()
+	if prefix == "" {
+		return path, true
+	}
+	if path == prefix {
+		return "/", true
+	}
+	if strings.HasPrefix(path, prefix+"/") {
+		return strings.TrimPrefix(path, prefix), true
+	}
+	return "", false
 }
 
 // ScopeLabel renders the owner for the UI: 全局 or the account name.
@@ -171,6 +198,46 @@ func (s *Store) ListGates(ctx context.Context) ([]Gate, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list gates: %w", err)
 	}
+	return gates, nil
+}
+
+// GatesForRoute returns the gates that could serve a subdomain label, ordered by
+// precedence: exact label before the "*" wildcard, longer path prefixes first.
+// The caller picks between the account scoped and global candidates.
+func (s *Store) GatesForRoute(ctx context.Context, prefix string) ([]Gate, error) {
+	rows, err := s.db.QueryContext(ctx, gateSelect+` WHERE g.to_prefix = ? OR g.to_prefix = '*'`, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("store: list gates for route: %w", err)
+	}
+	defer rows.Close()
+
+	gates := make([]Gate, 0, 4)
+	for rows.Next() {
+		gate, err := scanGate(rows)
+		if err != nil {
+			return nil, err
+		}
+		gates = append(gates, gate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list gates for route: %w", err)
+	}
+
+	// Most specific first: exact subdomain, then account scope, then the longest
+	// path prefix.
+	sort.SliceStable(gates, func(i, j int) bool {
+		a, b := gates[i], gates[j]
+		if (a.ToPrefix == prefix) != (b.ToPrefix == prefix) {
+			return a.ToPrefix == prefix
+		}
+		if (a.UserID != nil) != (b.UserID != nil) {
+			return a.UserID != nil
+		}
+		if len(a.RoutePrefix()) != len(b.RoutePrefix()) {
+			return len(a.RoutePrefix()) > len(b.RoutePrefix())
+		}
+		return a.ID < b.ID
+	})
 	return gates, nil
 }
 

@@ -28,7 +28,7 @@ const DefaultSessionTTL = 12 * time.Hour
 // sensible default.
 type Options struct {
 	Store    *store.Store
-	Sessions *SessionStore
+	Sessions Sessions
 	Limiter  *AttemptLimiter
 	Logger   *slog.Logger
 	Now      func() time.Time
@@ -41,7 +41,7 @@ type Options struct {
 
 type server struct {
 	store    *store.Store
-	sessions *SessionStore
+	sessions Sessions
 	limiter  *AttemptLimiter
 	logger   *slog.Logger
 	now      func() time.Time
@@ -92,8 +92,8 @@ func NewPortal(opts Options) http.Handler {
 	mux.HandleFunc("/", s.portalGuard(s.handlePortalPage))
 	mux.HandleFunc("/login", s.portalGuard(s.handlePortalPage))
 	mux.HandleFunc("/api/login", s.portalGuard(s.onlyMethod(http.MethodPost, s.handlePortalLogin)))
-	mux.HandleFunc("/api/logout", s.portalGuard(s.onlyMethod(http.MethodPost, s.handleLogout)))
-	mux.HandleFunc("/api/session", s.portalGuard(s.onlyMethod(http.MethodGet, s.handleSession)))
+	mux.HandleFunc("/api/logout", s.portalGuard(s.onlyMethod(http.MethodPost, s.handlePortalLogout)))
+	mux.HandleFunc("/api/session", s.portalGuard(s.onlyMethod(http.MethodGet, s.handlePortalSession)))
 	mux.HandleFunc("/api/", s.portalGuard(s.handleUnknownAPI))
 	mux.HandleFunc("/healthz", s.portalGuard(s.onlyMethod(http.MethodGet, s.handleHealth)))
 
@@ -244,13 +244,20 @@ func (s *server) handleUnknownAPI(w http.ResponseWriter, _ *http.Request) {
 	s.writeError(w, http.StatusNotFound, "not_found", "unknown endpoint")
 }
 
-// currentSession resolves the session token carried by the request.
+// currentSession resolves the session token carried by the request. The gateway
+// cookie is accepted as well, so signing in once at the portal also unlocks the
+// management area for an admin account (the role check still applies).
 func (s *server) currentSession(r *http.Request) (Session, bool) {
-	cookie, err := r.Cookie(SessionCookieName)
-	if err != nil {
-		return Session{}, false
+	for _, name := range []string{SessionCookieName, gatewayCookieSecureName, gatewayCookiePlainName} {
+		cookie, err := r.Cookie(name)
+		if err != nil {
+			continue
+		}
+		if session, ok := s.sessions.Get(cookie.Value, s.now()); ok {
+			return session, true
+		}
 	}
-	return s.sessions.Get(cookie.Value, s.now())
+	return Session{}, false
 }
 
 func (s *server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
