@@ -183,6 +183,8 @@ func run() error {
 		}
 	}()
 	if portalSrv != nil {
+		logger.Warn("the extra portal listener only serves the gateway domain itself: " +
+			"subdomains are refused there, point your reverse proxy at -gateway-addr instead")
 		go func() {
 			logger.Info("AuthDock portal listening", "addr", *portalAddr, "domain_check", domainCheck)
 			if err := portalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

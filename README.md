@@ -209,6 +209,12 @@ without a session is redirected to the portal
 (`https://gw.example.net/login?return_to=<original URL>`) and `return_to` is
 validated against the gateway domain (no open redirect).
 
+**Proxy headers.** The gateway accepts `X-Forwarded-Host` and
+`X-Forwarded-Proto` from the proxy. When a proxy rewrites `Host` to its upstream
+address (nginx does unless you set `proxy_set_header Host $host`), the forwarded
+host is what identifies the service and what goes into `return_to` and rewritten
+`Location` headers, so the login bounce still lands on the public address.
+
 **Cookies.** The session travels in one cookie, and the gateway owns it
 completely:
 

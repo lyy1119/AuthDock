@@ -553,3 +553,73 @@ func TestGatewayPortalSessionUsesTheGatewayScope(t *testing.T) {
 		t.Fatalf("portal session body = %s", rec.Body.String())
 	}
 }
+
+// TestGatewayUsesForwardedHostForReturnTo covers a reverse proxy that rewrites
+// Host to the upstream address: the redirect must still carry the public URL,
+// otherwise the login page rejects return_to and the visitor is stuck.
+func TestGatewayUsesForwardedHostForReturnTo(t *testing.T) {
+	env := newGatewayEnv(t, false)
+	env.gate(t, "public", "127.0.0.1:9", "public", "", nil)
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8081/week", nil)
+	req.Host = "127.0.0.1:8081"
+	req.Header.Set("X-Forwarded-Host", "public."+gatewayDomainName)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	location, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if location.Host != gatewayDomainName {
+		t.Fatalf("login host = %q, want the gateway domain", location.Host)
+	}
+	returnTo := location.Query().Get("return_to")
+	if returnTo != "https://public."+gatewayDomainName+"/week" {
+		t.Fatalf("return_to = %q, want the public address, not the upstream one", returnTo)
+	}
+}
+
+func TestGatewayExplainsAMissingGate(t *testing.T) {
+	env := newGatewayEnv(t, false)
+	upstream, _ := newUpstream(t, "svc")
+	aliceID := env.userID(t, "alice")
+	env.gate(t, "alice calendar", upstream.Listener.Addr().String(), "calendar", "", &aliceID)
+
+	cookie := env.login(t, "alice", alicePassword, "")
+	rec := requestAt(env.handler, http.MethodGet, "nope."+gatewayDomainName, "/", cookie, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("missing gate = %d, want 404", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "没有配置网关") {
+		t.Fatalf("the 404 page does not explain the problem: %s", body)
+	}
+	// It lists what this account can reach, which is the actionable part.
+	if !strings.Contains(body, "https://calendar."+gatewayDomainName+"/") {
+		t.Fatalf("the 404 page does not list the account's addresses: %s", body)
+	}
+	if !strings.Contains(body, "alice") {
+		t.Fatalf("the 404 page does not name the account: %s", body)
+	}
+}
+
+func TestGatewayExplainsAnotherAccountsGate(t *testing.T) {
+	env := newGatewayEnv(t, false)
+	upstream, _ := newUpstream(t, "bob-only")
+	bobID := env.userID(t, "bob")
+	env.gate(t, "bob only", upstream.Listener.Addr().String(), "private", "", &bobID)
+
+	aliceCookie := env.login(t, "alice", alicePassword, "")
+	rec := requestAt(env.handler, http.MethodGet, "private."+gatewayDomainName, "/", aliceCookie, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("another account's gate = %d, want 403", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "属于其他账号") {
+		t.Fatalf("the 403 page does not explain the problem: %s", body)
+	}
+}

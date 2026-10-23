@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -158,10 +160,69 @@ func (s *server) serveGatedRequest(w http.ResponseWriter, r *http.Request, prefi
 		s.proxyGate(w, r, *gate, rest)
 	case matchedAny:
 		// The address exists but belongs to another account.
-		http.Error(w, "403 forbidden: this address is not available to your account", http.StatusForbidden)
+		s.logger.Warn("gateway address belongs to another account",
+			"host", requestHost(r), "path", r.URL.Path, "user", user.Username)
+		s.writeGatePage(w, r, http.StatusForbidden, domain, user,
+			"这个地址属于其他账号",
+			"你已登录为 "+user.Username+"，但这个地址的网关归属于其他账号，因此不能访问。")
 	default:
-		http.NotFound(w, r)
+		s.logger.Warn("gateway address has no gate",
+			"host", requestHost(r), "path", r.URL.Path, "user", user.Username)
+		s.writeGatePage(w, r, http.StatusNotFound, domain, user,
+			"这个地址没有配置网关",
+			"网关域名下没有与 "+requestHost(r)+" 匹配的网关，或者该网关的路径前缀与 "+r.URL.Path+" 不符。")
 	}
+}
+
+// writeGatePage explains a 403/404 at a published address and lists what the
+// signed-in account can reach, which turns a silent failure into something the
+// visitor can act on.
+func (s *server) writeGatePage(w http.ResponseWriter, r *http.Request, status int, domain string, user *store.User, title, detail string) {
+	addresses := make([]string, 0, 4)
+	if gates, err := s.store.ListGates(r.Context()); err == nil {
+		for _, gate := range gates {
+			if gate.UserID == nil || (user != nil && *gate.UserID == user.ID) {
+				addresses = append(addresses, gate.Target(domain))
+			}
+		}
+	}
+
+	var list strings.Builder
+	if len(addresses) == 0 {
+		list.WriteString("<p class=\"muted\">你的账号目前还没有可访问的网关。</p>")
+	} else {
+		list.WriteString("<ul>")
+		for _, address := range addresses {
+			list.WriteString("<li><a href=\"" + html.EscapeString(address) + "\">" + html.EscapeString(address) + "</a></li>")
+		}
+		list.WriteString("</ul>")
+	}
+
+	account := "(未登录)"
+	if user != nil {
+		account = user.Username
+	}
+
+	body := "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" +
+		"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
+		"<title>" + html.EscapeString(title) + "</title><style>" +
+		"body{margin:0;min-height:100vh;display:grid;place-items:center;padding:1.5rem;" +
+		"font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#eef3f7;color:#16232b}" +
+		"main{width:min(100%,34rem);padding:1.75rem;background:#fff;border:1px solid #e0e8ee;border-radius:14px}" +
+		"h1{margin:0 0 .5rem;font-size:1.2rem}p{margin:.4rem 0;line-height:1.6}" +
+		".muted{color:#6b7c88;font-size:.9rem}ul{margin:.6rem 0 0;padding-left:1.2rem;line-height:1.8}" +
+		"a{color:#2f6fa8}code{background:#f3f6f9;padding:.1rem .35rem;border-radius:4px}</style></head><body><main>" +
+		"<h1>" + html.EscapeString(title) + "</h1>" +
+		"<p>" + html.EscapeString(detail) + "</p>" +
+		"<p class=\"muted\">当前账号：<code>" + html.EscapeString(account) + "</code>　" +
+		"请求地址：<code>" + html.EscapeString(requestAuthority(r)+r.URL.RequestURI()) + "</code></p>" +
+		"<p class=\"muted\">" + "你可以访问：" + "</p>" + list.String() +
+		"</main></body></html>"
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body)
 }
 
 // chooseGate picks the gate for this visitor: an account scoped gate wins over a
@@ -279,7 +340,17 @@ func requestProto(r *http.Request) string {
 
 // originalURL is the address the browser asked for, used as return_to.
 func originalURL(r *http.Request) string {
-	return requestProto(r) + "://" + r.Host + r.URL.RequestURI()
+	return requestProto(r) + "://" + requestAuthority(r) + r.URL.RequestURI()
+}
+
+// requestAuthority is the host[:port] the browser used. A reverse proxy may have
+// rewritten Host to its upstream address, so X-Forwarded-Host wins when present;
+// unlike requestHost it keeps the port, because it is used in URLs.
+func requestAuthority(r *http.Request) string {
+	if forwarded := r.Header.Get("X-Forwarded-Host"); forwarded != "" {
+		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+	}
+	return r.Host
 }
 
 // validateReturnTo only accepts addresses inside the gateway domain, which keeps
@@ -317,7 +388,7 @@ func (s *server) proxyGate(w http.ResponseWriter, r *http.Request, gate store.Ga
 	}
 
 	rest, restEscaped := splitEscapedRest(gate, r)
-	publicBase := fmt.Sprintf("%s://%s", requestProto(r), r.Host)
+	publicBase := fmt.Sprintf("%s://%s", requestProto(r), requestAuthority(r))
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
