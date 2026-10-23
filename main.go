@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,11 +43,11 @@ func run() error {
 	addr := flag.String("addr", envOr("AUTH_DOCK_ADDR", "127.0.0.1:8080"), "HTTP listen address")
 	dbPath := flag.String("db", envOr("AUTH_DOCK_DB", "data/authdock.db"), "path to the SQLite database file")
 	gatewayAddr := flag.String("gateway-addr",
-		firstNonEmpty(os.Getenv("AUTH_DOCK_GATEWAY_ADDR"), os.Getenv("AUTH_DOCK_PORTAL_ADDR"), "127.0.0.1:8081"),
+		firstNonEmpty(os.Getenv("AUTH_DOCK_GATEWAY_ADDR"), "127.0.0.1:8081"),
 		"HTTP listen address of the gateway (login portal + published services); put Caddy in front for TLS")
 	portalAddr := flag.String("portal-addr", envOr("AUTH_DOCK_PORTAL_ADDR", ""),
 		"optional extra listener that only serves the login portal (empty disables it)")
-	noDNCheck := flag.Bool("no-dn-check", false,
+	noDNCheck := flag.Bool("no-dn-check", envBool("AUTH_DOCK_NO_DN_CHECK"),
 		"skip the gateway domain check on the user portal (debug only)")
 	showVersion := flag.Bool("version", false, "print version information and exit")
 	resetAdminPassword := flag.Bool("reset-admin-password", false,
@@ -138,6 +139,14 @@ func run() error {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
+	}
+
+	// An extra portal listener on the same address as the gateway would only
+	// fight it for the port, so it is skipped with a warning instead.
+	if *portalAddr != "" && *portalAddr == *gatewayAddr {
+		logger.Warn("ignoring -portal-addr: it is the same address as -gateway-addr",
+			"addr", *portalAddr)
+		*portalAddr = ""
 	}
 
 	var portalSrv *http.Server
@@ -261,4 +270,14 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// envBool reads a boolean switch from the environment. Anything other than a
+// recognised true value is false, so a typo cannot silently enable a debug mode.
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

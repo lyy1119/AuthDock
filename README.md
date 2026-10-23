@@ -33,6 +33,25 @@ Then open <http://127.0.0.1:8080/login> for the management area and
 | `-version`              |                                           | Print build information and exit               |
 | `-reset-admin-password` |                                           | New random admin password (creates the account if missing), printed once, exit |
 
+Every listener setting can also come from the environment, which is what the
+systemd unit and the container use. A command line flag always wins over its
+variable:
+
+| Environment variable      | Flag             | Default           |
+| ------------------------- | ---------------- | ----------------- |
+| `AUTH_DOCK_ADDR`          | `-addr`          | `127.0.0.1:8080`  |
+| `AUTH_DOCK_GATEWAY_ADDR`  | `-gateway-addr`  | `127.0.0.1:8081`  |
+| `AUTH_DOCK_PORTAL_ADDR`   | `-portal-addr`   | unset             |
+| `AUTH_DOCK_DB`            | `-db`            | `data/authdock.db` |
+| `AUTH_DOCK_NO_DN_CHECK`   | `-no-dn-check`   | off (`1`/`true`/`yes`/`on` enable it) |
+
+```sh
+AUTH_DOCK_ADDR=127.0.0.1:8080 \
+AUTH_DOCK_GATEWAY_ADDR=127.0.0.1:8081 \
+AUTH_DOCK_DB=/var/lib/authdock/authdock.db \
+  ./authdock
+```
+
 The `-db` path is resolved to an absolute path in the start-up log and in the
 banner, because a relative path makes it easy to end up with two databases (and
 therefore two different bootstrap passwords) depending on the working
