@@ -24,6 +24,12 @@ type portalSessionResponse struct {
 	ExpiresAt  string       `json:"expires_at,omitempty"`
 	Domain     string       `json:"domain,omitempty"`
 	RedirectTo string       `json:"redirect_to,omitempty"`
+	// ReturnToRejected tells the page that a bounce target was present but not
+	// acceptable, so it can say so instead of silently staying put.
+	ReturnToRejected bool `json:"return_to_rejected,omitempty"`
+	// Addresses lists the published services this account can reach, so the
+	// success panel is useful even without a bounce target.
+	Addresses []string `json:"addresses,omitempty"`
 }
 
 type portalLoginRequest struct {
@@ -175,16 +181,64 @@ func (s *server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 
 	domain := gatewayDomainFrom(r)
 	s.setGatewayCookie(w, r, domain, token, session.ExpiresAt)
+
+	// The bounce target may arrive in the JSON body, in the query string (the
+	// link the browser followed) or in the cookie the gateway set when it
+	// redirected. The first acceptable one wins.
+	redirectTo := ""
+	rejected := ""
+	for _, candidate := range []string{req.ReturnTo, r.URL.Query().Get("return_to"), s.returnToCookie(r)} {
+		if candidate == "" {
+			continue
+		}
+		if validated := validateReturnTo(candidate, domain); validated != "" {
+			redirectTo = validated
+			break
+		}
+		if rejected == "" {
+			rejected = candidate
+		}
+	}
+	s.clearReturnToCookie(w, r, domain)
+	if redirectTo == "" && rejected != "" {
+		s.logger.Warn("portal login ignored an invalid return_to",
+			"return_to", rejected, "domain", domain, "remote", r.RemoteAddr)
+	}
 	s.logger.Info("portal login succeeded", "username", user.Username, "role", user.Role,
 		"remote", r.RemoteAddr)
 
+	addresses := []string{}
+	if redirectTo == "" {
+		addresses = s.accountAddresses(r, *user, domain)
+	}
+
+	s.logger.Info("portal login redirect", "user", user.Username, "return_to", redirectTo)
 	s.writeJSON(w, http.StatusOK, portalSessionResponse{
-		OK:         true,
-		User:       &userPayload{Username: user.Username, Role: user.Role},
-		ExpiresAt:  session.ExpiresAt.UTC().Format(time.RFC3339),
-		Domain:     domain,
-		RedirectTo: validateReturnTo(req.ReturnTo, domain),
+		OK:               true,
+		User:             &userPayload{Username: user.Username, Role: user.Role},
+		ExpiresAt:        session.ExpiresAt.UTC().Format(time.RFC3339),
+		Domain:           domain,
+		RedirectTo:       redirectTo,
+		ReturnToRejected: redirectTo == "" && rejected != "",
+		Addresses:        addresses,
 	})
+}
+
+// accountAddresses lists the public addresses a user may reach: the global
+// gates plus the ones scoped to their account.
+func (s *server) accountAddresses(r *http.Request, user store.User, domain string) []string {
+	gates, err := s.store.ListGates(r.Context())
+	if err != nil {
+		s.logger.Error("list gates for the success panel", "err", err)
+		return nil
+	}
+	addresses := make([]string, 0, len(gates))
+	for _, gate := range gates {
+		if gate.UserID == nil || *gate.UserID == user.ID {
+			addresses = append(addresses, gate.Target(domain))
+		}
+	}
+	return addresses
 }
 
 // handlePortalLogout drops the gateway session cookie.
@@ -198,6 +252,7 @@ func (s *server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.clearGatewayCookie(w, r, domain)
+	s.clearReturnToCookie(w, r, domain)
 	s.writeJSON(w, http.StatusOK, adminOKResponse{OK: true})
 }
 

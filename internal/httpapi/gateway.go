@@ -178,13 +178,9 @@ func (s *server) serveGatedRequest(w http.ResponseWriter, r *http.Request, prefi
 // signed-in account can reach, which turns a silent failure into something the
 // visitor can act on.
 func (s *server) writeGatePage(w http.ResponseWriter, r *http.Request, status int, domain string, user *store.User, title, detail string) {
-	addresses := make([]string, 0, 4)
-	if gates, err := s.store.ListGates(r.Context()); err == nil {
-		for _, gate := range gates {
-			if gate.UserID == nil || (user != nil && *gate.UserID == user.ID) {
-				addresses = append(addresses, gate.Target(domain))
-			}
-		}
+	addresses := []string{}
+	if user != nil {
+		addresses = s.accountAddresses(r, *user, domain)
 	}
 
 	var list strings.Builder
@@ -316,16 +312,63 @@ func (s *server) clearGatewayCookie(w http.ResponseWriter, r *http.Request, doma
 	}
 }
 
+// returnToCookie remembers where an unauthenticated visitor was heading. The
+// query parameter alone is fragile: a proxy may drop it and a page restored from
+// a tab may lose it. The cookie keeps the bounce working.
+const returnToCookieName = "gateway_return_to"
+
+func (s *server) setReturnToCookie(w http.ResponseWriter, r *http.Request, domain, target string) {
+	if target == "" {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     returnToCookieName,
+		Value:    target,
+		Path:     "/",
+		Domain:   domain,
+		MaxAge:   600,
+		HttpOnly: true,
+		Secure:   isSecureRequest(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (s *server) clearReturnToCookie(w http.ResponseWriter, r *http.Request, domain string) {
+	cookie := &http.Cookie{
+		Name:     returnToCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   isSecureRequest(r),
+		SameSite: http.SameSiteLaxMode,
+	}
+	if domain != "" {
+		cookie.Domain = domain
+	}
+	http.SetCookie(w, cookie)
+}
+
+func (s *server) returnToCookie(r *http.Request) string {
+	cookie, err := r.Cookie(returnToCookieName)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
 // redirectToLogin sends the visitor to the portal, remembering where they were.
 func (s *server) redirectToLogin(w http.ResponseWriter, r *http.Request, domain string) {
 	loginHost := domain
 	if loginHost == "" {
 		loginHost = requestHost(r)
 	}
-	target := fmt.Sprintf("%s://%s/login?return_to=%s",
-		requestProto(r), loginHost, url.QueryEscape(originalURL(r)))
+	target := originalURL(r)
+	s.setReturnToCookie(w, r, domain, target)
+
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, target, http.StatusFound)
+	http.Redirect(w, r, fmt.Sprintf("%s://%s/login?return_to=%s",
+		requestProto(r), loginHost, url.QueryEscape(target)), http.StatusFound)
 }
 
 func requestProto(r *http.Request) string {

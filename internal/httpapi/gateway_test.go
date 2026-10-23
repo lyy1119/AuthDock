@@ -623,3 +623,92 @@ func TestGatewayExplainsAnotherAccountsGate(t *testing.T) {
 		t.Fatalf("the 403 page does not explain the problem: %s", body)
 	}
 }
+
+// TestPortalLoginFallsBackToTheReturnToCookie is the fix for "after logging in
+// I land on the success panel instead of the address I asked for": the bounce
+// target is remembered in a cookie, so a proxy that drops the query string
+// cannot lose it.
+func TestPortalLoginFallsBackToTheReturnToCookie(t *testing.T) {
+	env := newGatewayEnv(t, false)
+	upstream, _ := newUpstream(t, "svc")
+	env.gate(t, "svc", upstream.Listener.Addr().String(), "svc", "", nil)
+
+	bounce := requestAt(env.handler, http.MethodGet, "svc."+gatewayDomainName, "/week?a=1", nil, nil)
+	if bounce.Code != http.StatusFound {
+		t.Fatalf("anonymous request = %d, want 302", bounce.Code)
+	}
+
+	var returnCookie *http.Cookie
+	for _, cookie := range bounce.Result().Cookies() {
+		if cookie.Name == returnToCookieName && cookie.Value != "" {
+			returnCookie = cookie
+		}
+	}
+	if returnCookie == nil {
+		t.Fatal("the redirect did not set a return_to cookie")
+	}
+	if want := "http://svc." + gatewayDomainName + "/week?a=1"; returnCookie.Value != want {
+		t.Fatalf("return_to cookie = %q, want %q", returnCookie.Value, want)
+	}
+
+	// The login request carries no usable return_to in its body or query, only
+	// the cookie.
+	payload, _ := json.Marshal(map[string]string{
+		"username": "alice", "password": alicePassword, "return_to": "",
+	})
+	req := httptest.NewRequest(http.MethodPost, "http://"+gatewayDomainName+"/api/login", bytes.NewReader(payload))
+	req.Host = gatewayDomainName
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(returnCookie)
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body portalSessionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := "http://svc." + gatewayDomainName + "/week?a=1"; body.RedirectTo != want {
+		t.Fatalf("redirect_to = %q, want %q (the cookie fallback)", body.RedirectTo, want)
+	}
+	if body.ReturnToRejected {
+		t.Fatal("a valid cookie target was reported as rejected")
+	}
+
+	// The cookie is single use.
+	cleared := false
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == returnToCookieName && cookie.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("the return_to cookie was not cleared after login")
+	}
+}
+
+func TestPortalLoginExplainsARejectedReturnTo(t *testing.T) {
+	env := newGatewayEnv(t, false)
+
+	payload, _ := json.Marshal(map[string]string{
+		"username": "alice", "password": alicePassword, "return_to": "https://evil.example.org/x",
+	})
+	req := httptest.NewRequest(http.MethodPost, "http://"+gatewayDomainName+"/api/login", bytes.NewReader(payload))
+	req.Host = gatewayDomainName
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+
+	var body portalSessionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.RedirectTo != "" {
+		t.Fatalf("an external target was accepted: %q", body.RedirectTo)
+	}
+	if !body.ReturnToRejected {
+		t.Fatal("the rejection was not reported to the page")
+	}
+}

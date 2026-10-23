@@ -57,6 +57,9 @@
   .msg.ok { color: #1f7a4d; }
   .who { margin: 0 0 1.2rem; padding: .9rem 1rem; background: #f4f8fb; border: 1px solid #dbe7f0; border-radius: 10px; font-size: .95rem; }
   .who strong { color: #16232b; }
+  .hint { margin: .2rem 0 .3rem; font-size: .9rem; color: #6b7c88; }
+  #address-list { margin: 0 0 1rem; padding-left: 1.2rem; line-height: 1.9; }
+  #address-list a { color: #2f6fa8; word-break: break-all; }
   .role { margin-left: .4rem; padding: .1rem .45rem; font-size: .75rem; color: #245a8a; background: #e4eff8; border-radius: 999px; }
   .hidden { display: none; }
   .foot { margin: 1.2rem 0 0; font-size: .78rem; color: #8c9aa6; }
@@ -78,8 +81,12 @@
 
   <section id="session" class="hidden">
     <p class="who">已登录：<strong id="session-name"></strong><span class="role" id="session-role"></span></p>
+    <div id="session-addresses" class="hidden">
+      <p class="hint">你可以访问：</p>
+      <ul id="address-list"></ul>
+    </div>
     <button id="logout" class="quiet" type="button">退出登录</button>
-    <p class="msg ok" id="session-message"></p>
+    <p class="msg" id="session-message"></p>
   </section>
 
   <p class="foot" id="domain-foot"></p>
@@ -109,11 +116,32 @@
     return role === 'admin' ? '管理员' : '普通用户';
   }
 
-  function showSession(user) {
+  var addressBox = document.getElementById('session-addresses');
+  var addressList = document.getElementById('address-list');
+
+  function showAddresses(addresses) {
+    addressList.replaceChildren();
+    if (!addresses || addresses.length === 0) {
+      addressBox.classList.add('hidden');
+      return;
+    }
+    addresses.forEach(function (address) {
+      var item = document.createElement('li');
+      var link = document.createElement('a');
+      link.href = address;
+      link.textContent = address;
+      item.appendChild(link);
+      addressList.appendChild(item);
+    });
+    addressBox.classList.remove('hidden');
+  }
+
+  function showSession(user, addresses) {
     sessionName.textContent = user.username;
     sessionRole.textContent = roleLabel(user.role);
     form.classList.add('hidden');
     sessionPanel.classList.remove('hidden');
+    showAddresses(addresses);
   }
 
   function showLogin() {
@@ -154,7 +182,10 @@
           window.location.href = data.redirect_to;
           return;
         }
-        showSession(data.user);
+        showSession(data.user, data.addresses);
+        if (data.return_to_rejected) {
+          sessionMessage.textContent = '登录成功，但原来的地址不属于网关域名，因此没有自动跳转。';
+        }
         return;
       }
       message.textContent = data.message || ('登录失败（HTTP ' + response.status + '）');

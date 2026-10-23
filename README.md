@@ -204,10 +204,18 @@ path prefix beats a shorter one. `to_suffix` is stripped before forwarding, so
 `/deep`.
 
 Answers: the right gate is proxied; an address that exists but belongs to
-another account gets `403`; an address with no gate at all gets `404`; a visitor
-without a session is redirected to the portal
-(`https://gw.example.net/login?return_to=<original URL>`) and `return_to` is
-validated against the gateway domain (no open redirect).
+another account gets `403`; an address with no gate at all gets `404` — both
+with a page that names the account and lists the addresses it can reach. A
+visitor without a session is redirected to the portal
+(`https://gw.example.net/login?return_to=<original URL>`).
+
+The bounce target is validated against the gateway domain (no open redirect) and
+carried three ways, so it survives proxies that rewrite or drop the query
+string: the `return_to` query parameter, the JSON body the page posts, and a
+short-lived `gateway_return_to` cookie the gateway sets when it redirects. The
+first acceptable one wins and is cleared after login. When there is no bounce
+target at all — the login page was opened directly — the success panel lists the
+addresses the account can reach instead of leaving the visitor on a dead end.
 
 **Proxy headers.** The gateway accepts `X-Forwarded-Host` and
 `X-Forwarded-Proto` from the proxy. When a proxy rewrites `Host` to its upstream
