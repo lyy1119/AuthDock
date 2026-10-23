@@ -268,9 +268,10 @@ func TestGatewayRoutesTheSameHostPerUser(t *testing.T) {
 		t.Fatalf("bob upstream path = %q", path)
 	}
 
-	// The upstream host is rewritten, the original one is in X-Forwarded-Host.
-	if _, _, host := aliceRecord.last(); !strings.HasPrefix(host, "127.0.0.1:") {
-		t.Fatalf("upstream Host = %q, want the upstream address", host)
+	// By default the public Host is preserved, which is what a vhosted upstream
+	// (another Caddy, nginx) needs in order to pick its site.
+	if _, _, host := aliceRecord.last(); host != "calendar."+gatewayDomainName {
+		t.Fatalf("upstream Host = %q, want the preserved public host", host)
 	}
 	aliceRecord.mu.Lock()
 	forwarded := aliceRecord.xfHosts[len(aliceRecord.xfHosts)-1]
@@ -710,5 +711,89 @@ func TestPortalLoginExplainsARejectedReturnTo(t *testing.T) {
 	}
 	if !body.ReturnToRejected {
 		t.Fatal("the rejection was not reported to the page")
+	}
+}
+
+// TestGatewayUpstreamHostMode covers the setting that decides which Host header a
+// published service receives.
+func TestGatewayUpstreamHostMode(t *testing.T) {
+	env := newGatewayEnv(t, false)
+	upstream, record := newUpstream(t, "svc")
+	env.gate(t, "svc", upstream.Listener.Addr().String(), "svc", "", nil)
+	cookie := env.login(t, "alice", alicePassword, "")
+
+	// Default: preserve.
+	requestAt(env.handler, http.MethodGet, "svc."+gatewayDomainName, "/", cookie, nil)
+	if _, _, host := record.last(); host != "svc."+gatewayDomainName {
+		t.Fatalf("preserve mode sent Host = %q", host)
+	}
+
+	// Switch to the upstream address.
+	if err := env.db.SetSetting(context.Background(), store.SettingsKeyUpstreamHost, store.UpstreamHostUpstream); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	requestAt(env.handler, http.MethodGet, "svc."+gatewayDomainName, "/", cookie, nil)
+	if _, _, host := record.last(); !strings.HasPrefix(host, "127.0.0.1:") {
+		t.Fatalf("upstream mode sent Host = %q, want the upstream address", host)
+	}
+}
+
+// TestGatewayHTTPSUpstreamNeedsInsecureOptIn covers a service with a self signed
+// certificate, such as another Caddy using tls internal.
+func TestGatewayHTTPSUpstreamNeedsInsecureOptIn(t *testing.T) {
+	env := newGatewayEnv(t, false)
+
+	tlsUpstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "secure upstream")
+	}))
+	t.Cleanup(tlsUpstream.Close)
+	env.gate(t, "secure", tlsUpstream.URL, "secure", "", nil)
+
+	cookie := env.login(t, "alice", alicePassword, "")
+
+	// Without the opt-in the certificate cannot be verified: a clear 502.
+	rec := requestAt(env.handler, http.MethodGet, "secure."+gatewayDomainName, "/", cookie, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("self signed upstream without opt-in = %d, want 502", rec.Code)
+	}
+
+	// With the opt-in the same gate works.
+	if err := env.db.SetSetting(context.Background(), store.SettingsKeyUpstreamInsecure, "1"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	rec = requestAt(env.handler, http.MethodGet, "secure."+gatewayDomainName, "/", cookie, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("self signed upstream with opt-in = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "secure upstream") {
+		t.Fatalf("unexpected body: %s", body)
+	}
+}
+
+// TestGatewayDetectsUpstreamRedirectLoop covers the case where an upstream answers
+// plain HTTP with a redirect to its own HTTPS address, which used to make the
+// browser bounce between the gateway and the service forever.
+func TestGatewayDetectsUpstreamRedirectLoop(t *testing.T) {
+	env := newGatewayEnv(t, false)
+
+	loopUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://"+r.Host+r.URL.RequestURI())
+		w.WriteHeader(http.StatusPermanentRedirect)
+	}))
+	t.Cleanup(loopUpstream.Close)
+	env.gate(t, "loop", loopUpstream.Listener.Addr().String(), "loop", "", nil)
+
+	cookie := env.login(t, "alice", alicePassword, "")
+	rec := requestAt(env.handler, http.MethodGet, "loop."+gatewayDomainName, "/week", cookie, nil)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("redirect loop = %d, want 502 with an explanation", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "重定向回了同一个地址") {
+		t.Fatalf("the loop page does not explain the problem: %s", body)
+	}
+	if !strings.Contains(body, "https://") {
+		t.Fatalf("the loop page does not suggest an https upstream: %s", body)
 	}
 }

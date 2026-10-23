@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -35,6 +37,11 @@ var gatewayOwnedCookies = map[string]bool{
 	gatewayCookiePlainName:  true,
 	SessionCookieName:       true,
 }
+
+// errUpstreamRedirectLoop reports an upstream that answered with a redirect back
+// to the very address the visitor asked for, which the browser would follow
+// forever.
+var errUpstreamRedirectLoop = errors.New("httpapi: upstream redirect loop")
 
 type gatewayDomainKey struct{}
 
@@ -432,12 +439,26 @@ func (s *server) proxyGate(w http.ResponseWriter, r *http.Request, gate store.Ga
 
 	rest, restEscaped := splitEscapedRest(gate, r)
 	publicBase := fmt.Sprintf("%s://%s", requestProto(r), requestAuthority(r))
+	publicURL := publicBase + r.URL.RequestURI()
+
+	hostMode, insecure := s.upstreamOptions(r)
+	var transport http.RoundTripper
+	if insecure {
+		transport = s.insecureTransport()
+	}
 
 	proxy := &httputil.ReverseProxy{
+		Transport: transport,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = upstream.Scheme
 			pr.Out.URL.Host = upstream.Host
-			pr.Out.Host = upstream.Host
+			if hostMode == store.UpstreamHostUpstream {
+				pr.Out.Host = upstream.Host
+			} else {
+				// Preserve the public Host: another Caddy or nginx in front of the
+				// service picks its site block from this header.
+				pr.Out.Host = requestAuthority(r)
+			}
 			// Keep the upstream's own base path, then the forwarded remainder.
 			joined, escaped := joinUpstreamPath(upstream.Path, rest, restEscaped)
 			pr.Out.URL.Path = joined
@@ -447,15 +468,118 @@ func (s *server) proxyGate(w http.ResponseWriter, r *http.Request, gate store.Ga
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			dropOwnSetCookies(resp)
+			if redirectLoops(resp, publicURL) {
+				resp.Body.Close()
+				return errUpstreamRedirectLoop
+			}
 			rewriteLocation(resp, upstream, publicBase)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if errors.Is(err, errUpstreamRedirectLoop) {
+				s.logger.Warn("gateway upstream redirects to itself",
+					"gate", gate.Name, "upstream", gate.From, "public", publicURL)
+				s.writeRedirectLoopPage(w, r, gate, publicURL)
+				return
+			}
 			s.logger.Warn("gateway upstream failed", "gate", gate.Name, "upstream", gate.From, "err", err)
-			http.Error(w, "502 bad gateway", http.StatusBadGateway)
+			http.Error(w, "502 bad gateway: "+err.Error(), http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// upstreamOptions loads the two settings that shape how the gateway talks to an
+// upstream service.
+func (s *server) upstreamOptions(r *http.Request) (hostMode string, insecure bool) {
+	ctx := r.Context()
+
+	hostMode, _ = s.store.Setting(ctx, store.SettingsKeyUpstreamHost)
+	if normalized, err := store.NormalizeUpstreamHost(hostMode); err == nil {
+		hostMode = normalized
+	} else {
+		hostMode = store.UpstreamHostPreserve
+	}
+
+	value, err := s.store.Setting(ctx, store.SettingsKeyUpstreamInsecure)
+	return hostMode, err == nil && value == "1"
+}
+
+// insecureTransport is the cached transport used for https upstreams with a
+// certificate the gateway cannot verify (Caddy "tls internal", self signed).
+func (s *server) insecureTransport() http.RoundTripper {
+	s.transportOnce.Do(func() {
+		s.transportInsecure = &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          64,
+			MaxIdleConnsPerHost:   8,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // opt-in for internal CAs
+		}
+	})
+	return s.transportInsecure
+}
+
+// redirectLoops reports an upstream redirect that points back at the address the
+// visitor requested. Forwarding it would make the browser bounce forever.
+func redirectLoops(resp *http.Response, publicURL string) bool {
+	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		return false
+	}
+	location := resp.Header.Get("Location")
+	if location == "" || resp.Request == nil {
+		return false
+	}
+	target, err := url.Parse(location)
+	if err != nil {
+		return false
+	}
+	resolved := resp.Request.URL.ResolveReference(target)
+
+	public, err := url.Parse(publicURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(resolved.Host, public.Host) &&
+		resolved.EscapedPath() == public.EscapedPath() &&
+		resolved.RawQuery == public.RawQuery
+}
+
+// writeRedirectLoopPage explains the loop instead of letting the browser spin.
+func (s *server) writeRedirectLoopPage(w http.ResponseWriter, r *http.Request, gate store.Gate, publicURL string) {
+	body := "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" +
+		"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
+		"<title>上游重定向形成循环</title><style>" +
+		"body{margin:0;min-height:100vh;display:grid;place-items:center;padding:1.5rem;" +
+		"font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#eef3f7;color:#16232b}" +
+		"main{width:min(100%,38rem);padding:1.75rem;background:#fff;border:1px solid #e0e8ee;border-radius:14px}" +
+		"h1{margin:0 0 .6rem;font-size:1.15rem}p,li{line-height:1.7}.muted{color:#6b7c88;font-size:.9rem}" +
+		"code{background:#f3f6f9;padding:.1rem .35rem;border-radius:4px}</style></head><body><main>" +
+		"<h1>上游把请求重定向回了同一个地址</h1>" +
+		"<p>网关把请求转发给 <code>" + html.EscapeString(gate.From) + "</code> 时，上游返回了一个指向 " +
+		"<code>" + html.EscapeString(publicURL) + "</code> 的重定向，浏览器会一直循环下去。</p>" +
+		"<p class=\"muted\">最常见的原因是：上游服务（例如另一个 Caddy）只提供 HTTPS，" +
+		"而网关是用 HTTP 访问它的，于是上游把 HTTP 强制跳转到 HTTPS。</p>" +
+		"<p>解决办法（任选其一）：</p><ul>" +
+		"<li>把这条网关的源地址改成 <code>https://…</code> 形式；</li>" +
+		"<li>如果上游用的是自签或内部 CA 证书（Caddy 的 <code>tls internal</code>），" +
+		"到「系统设置」里打开「跳过上游 HTTPS 证书校验」；</li>" +
+		"<li>或者让上游在这个端口上直接提供 HTTP 服务。</li></ul>" +
+		"<p class=\"muted\">网关：<code>" + html.EscapeString(gate.Name) + "</code>　源：<code>" +
+		html.EscapeString(gate.From) + "</code></p>" +
+		"</main></body></html>"
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusBadGateway)
+	_, _ = io.WriteString(w, body)
 }
 
 // upstreamURL normalises the stored address into a URL; a bare host:port means

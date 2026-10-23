@@ -58,6 +58,10 @@ type adminGateResponse struct {
 
 type adminSettings struct {
 	GatewayDomain string `json:"gateway_domain"`
+	// UpstreamHost is "preserve" (default) or "upstream".
+	UpstreamHost string `json:"upstream_host"`
+	// UpstreamInsecure skips TLS verification for https upstreams.
+	UpstreamInsecure bool `json:"upstream_insecure"`
 }
 
 type adminSettingsResponse struct {
@@ -345,12 +349,12 @@ func (s *server) deleteAdminUser(w http.ResponseWriter, r *http.Request, id int6
 func (s *server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		domain, err := s.store.Setting(r.Context(), store.SettingsKeyGatewayDomain)
+		settings, err := s.readSettings(r)
 		if err != nil {
-			s.internalError(w, "read gateway domain", err)
+			s.internalError(w, "read settings", err)
 			return
 		}
-		s.writeJSON(w, http.StatusOK, adminSettingsResponse{OK: true, Settings: adminSettings{GatewayDomain: domain}})
+		s.writeJSON(w, http.StatusOK, adminSettingsResponse{OK: true, Settings: settings})
 
 	case http.MethodPut:
 		var body adminSettings
@@ -361,17 +365,67 @@ func (s *server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, "invalid_request", "网关域名必须是裸域名，例如 gw.example.net")
 			return
 		}
-		if err := s.store.SetSetting(r.Context(), store.SettingsKeyGatewayDomain, body.GatewayDomain); err != nil {
-			s.internalError(w, "write gateway domain", err)
+		hostMode, err := store.NormalizeUpstreamHost(body.UpstreamHost)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, "invalid_request", "上游 Host 传递方式只能是 preserve 或 upstream")
 			return
 		}
+
+		ctx := r.Context()
+		insecure := "0"
+		if body.UpstreamInsecure {
+			insecure = "1"
+		}
+		for key, value := range map[string]string{
+			store.SettingsKeyGatewayDomain:    body.GatewayDomain,
+			store.SettingsKeyUpstreamHost:     hostMode,
+			store.SettingsKeyUpstreamInsecure: insecure,
+		} {
+			if err := s.store.SetSetting(ctx, key, value); err != nil {
+				s.internalError(w, "write setting "+key, err)
+				return
+			}
+		}
+
 		session, _ := s.currentSession(r)
-		s.logger.Info("admin saved gateway domain", "domain", body.GatewayDomain, "by", session.Username)
-		s.writeJSON(w, http.StatusOK, adminSettingsResponse{OK: true, Settings: adminSettings{GatewayDomain: body.GatewayDomain}})
+		s.logger.Info("admin saved settings", "domain", body.GatewayDomain, "upstream_host", hostMode,
+			"upstream_insecure", body.UpstreamInsecure, "by", session.Username)
+		s.writeJSON(w, http.StatusOK, adminSettingsResponse{OK: true, Settings: adminSettings{
+			GatewayDomain:    body.GatewayDomain,
+			UpstreamHost:     hostMode,
+			UpstreamInsecure: body.UpstreamInsecure,
+		}})
 
 	default:
 		s.methodNotAllowed(w, "GET, PUT")
 	}
+}
+
+// readSettings loads the gateway settings.
+func (s *server) readSettings(r *http.Request) (adminSettings, error) {
+	ctx := r.Context()
+
+	domain, err := s.store.Setting(ctx, store.SettingsKeyGatewayDomain)
+	if err != nil {
+		return adminSettings{}, err
+	}
+	hostMode, err := s.store.Setting(ctx, store.SettingsKeyUpstreamHost)
+	if err != nil {
+		return adminSettings{}, err
+	}
+	hostMode, err = store.NormalizeUpstreamHost(hostMode)
+	if err != nil {
+		hostMode = store.UpstreamHostPreserve
+	}
+	insecure, err := s.store.Setting(ctx, store.SettingsKeyUpstreamInsecure)
+	if err != nil {
+		return adminSettings{}, err
+	}
+	return adminSettings{
+		GatewayDomain:    domain,
+		UpstreamHost:     hostMode,
+		UpstreamInsecure: insecure == "1",
+	}, nil
 }
 
 // ── gates ──────────────────────────────────────────────────────────────

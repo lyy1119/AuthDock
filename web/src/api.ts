@@ -160,19 +160,31 @@ export function deleteGate(id: number): Promise<{ ok: boolean }> {
 
 export interface Settings {
   gateway_domain: string
+  /** Which Host header published services receive. */
+  upstream_host: 'preserve' | 'upstream'
+  /** Skip TLS verification for https upstreams (internal CA, self signed). */
+  upstream_insecure: boolean
 }
 
 export async function getSettings(signal?: AbortSignal): Promise<Settings> {
-  const data = await request<{ settings?: Settings }>('settings', { signal })
-  return { gateway_domain: data.settings?.gateway_domain ?? '' }
+  const data = await request<{ settings?: Partial<Settings> }>('settings', { signal })
+  return {
+    gateway_domain: data.settings?.gateway_domain ?? '',
+    upstream_host: data.settings?.upstream_host === 'upstream' ? 'upstream' : 'preserve',
+    upstream_insecure: data.settings?.upstream_insecure === true,
+  }
 }
 
 export async function saveSettings(input: Settings): Promise<Settings> {
-  const data = await request<{ settings?: Settings }>('settings', {
+  const data = await request<{ settings?: Partial<Settings> }>('settings', {
     method: 'PUT',
     body: JSON.stringify(input),
   })
-  return { gateway_domain: data.settings?.gateway_domain ?? '' }
+  return {
+    gateway_domain: data.settings?.gateway_domain ?? '',
+    upstream_host: data.settings?.upstream_host === 'upstream' ? 'upstream' : 'preserve',
+    upstream_insecure: data.settings?.upstream_insecure === true,
+  }
 }
 
 // ── session ──────────────────────────────────────────────────────────────

@@ -217,6 +217,21 @@ first acceptable one wins and is cleared after login. When there is no bounce
 target at all — the login page was opened directly — the success panel lists the
 addresses the account can reach instead of leaving the visitor on a dead end.
 
+**Talking to the upstream.** Two settings under 系统设置 shape the hop to the
+published service:
+
+| Setting | Values | Meaning |
+| ------- | ------ | ------- |
+| 上游 Host 传递方式 / `upstream_host` | `preserve` (default), `upstream` | `preserve` forwards the public Host the browser used, which is what a second Caddy or nginx needs to pick its site block; `upstream` sends the upstream address instead. |
+| 跳过上游 HTTPS 证书校验 / `upstream_insecure` | off (default), on | Lets the gateway reach an https upstream whose certificate it cannot verify, such as Caddy's `tls internal` CA. |
+
+Point `from` at the address that already speaks the right protocol: a service
+that only serves HTTPS needs `https://10.0.0.1:443`, a plain HTTP service needs
+`10.0.0.1:8080`. A redirect the upstream sends back to the very address the
+visitor asked for is detected and answered with a page that explains the loop
+instead of letting the browser bounce forever — that is the usual symptom of
+pointing an `http://` gate at an HTTPS-only upstream.
+
 **Proxy headers.** The gateway accepts `X-Forwarded-Host` and
 `X-Forwarded-Proto` from the proxy. When a proxy rewrites `Host` to its upstream
 address (nginx does unless you set `proxy_set_header Host $host`), the forwarded
@@ -310,8 +325,8 @@ is relative, which keeps the app working behind a path-prefixing reverse proxy
 | POST   | `/api/admin/gates`       | `{"name","from","to_prefix","to_suffix"}`                |
 | PATCH  | `/api/admin/gates/{id}`  | Same fields; rewrites one gate                           |
 | DELETE | `/api/admin/gates/{id}`  | Delete a gate                                            |
-| GET    | `/api/admin/settings`    | `{"gateway_domain":"gw.example.net"}`                    |
-| PUT    | `/api/admin/settings`    | `{"gateway_domain":"gw.example.net"}`                    |
+| GET    | `/api/admin/settings`    | `{"gateway_domain","upstream_host","upstream_insecure"}` |
+| PUT    | `/api/admin/settings`    | Same three fields; `upstream_host` is `preserve`/`upstream` |
 
 Guard rails: a session is re-validated against the database on every management
 call (so a role change or deletion takes effect immediately), the last admin

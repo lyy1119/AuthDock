@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lyy1119/AuthDock/internal/store"
@@ -49,6 +50,11 @@ type server struct {
 	loginPage  []byte
 	portalPage []byte
 	noDNCheck  bool
+
+	// transportInsecure is the lazily built transport for https upstreams whose
+	// certificate the gateway cannot verify.
+	transportOnce     sync.Once
+	transportInsecure *http.Transport
 }
 
 // New builds the management handler with all admin routes mounted.

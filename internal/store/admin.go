@@ -11,9 +11,38 @@ import (
 	"github.com/lyy1119/AuthDock/internal/passwd"
 )
 
-// SettingsKeyGatewayDomain is the settings row holding the gateway base domain,
-// e.g. "gw.example.net".
-const SettingsKeyGatewayDomain = "gateway_domain"
+const (
+	// SettingsKeyGatewayDomain is the settings row holding the gateway base
+	// domain, e.g. "gw.example.net".
+	SettingsKeyGatewayDomain = "gateway_domain"
+
+	// SettingsKeyUpstreamHost decides which Host header published services see.
+	SettingsKeyUpstreamHost = "upstream_host"
+
+	// SettingsKeyUpstreamInsecure allows https upstreams with a certificate the
+	// gateway cannot verify, such as a Caddy "tls internal" CA.
+	SettingsKeyUpstreamInsecure = "upstream_insecure"
+)
+
+// Accepted values for SettingsKeyUpstreamHost.
+const (
+	// UpstreamHostPreserve forwards the public host the browser used, which is
+	// what vhosted upstreams (another Caddy, nginx) need to pick their site.
+	UpstreamHostPreserve = "preserve"
+	// UpstreamHostUpstream forwards the upstream address instead.
+	UpstreamHostUpstream = "upstream"
+)
+
+// NormalizeUpstreamHost validates the Host header mode; empty means preserve.
+func NormalizeUpstreamHost(mode string) (string, error) {
+	switch mode {
+	case "":
+		return UpstreamHostPreserve, nil
+	case UpstreamHostPreserve, UpstreamHostUpstream:
+		return mode, nil
+	}
+	return "", fmt.Errorf("store: unknown upstream host mode %q", mode)
+}
 
 // ListUsers returns every account ordered by id.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
