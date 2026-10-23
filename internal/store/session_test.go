@@ -13,11 +13,11 @@ func TestSessionLifecycle(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 
 	expires := now.Add(12 * time.Hour)
-	if err := db.CreateSession(ctx, "hash-alice", "alice", RoleUser, expires); err != nil {
+	if err := db.CreateSession(ctx, ScopeAdmin, "hash-alice", "alice", RoleUser, expires); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	session, ok, err := db.GetSession(ctx, "hash-alice", now)
+	session, ok, err := db.GetSession(ctx, ScopeAdmin, "hash-alice", now)
 	if err != nil || !ok {
 		t.Fatalf("GetSession = %+v, %v, %v", session, ok, err)
 	}
@@ -38,10 +38,10 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 
 	// Expired sessions disappear.
-	if _, ok, _ := db.GetSession(ctx, "hash-alice", expires.Add(time.Minute)); ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeAdmin, "hash-alice", expires.Add(time.Minute)); ok {
 		t.Fatal("an expired session was returned")
 	}
-	if _, ok, _ := db.GetSession(ctx, "hash-alice", now); ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeAdmin, "hash-alice", now); ok {
 		t.Fatal("the expired session was not cleaned up")
 	}
 }
@@ -51,10 +51,10 @@ func TestPruneSessions(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 
-	if err := db.CreateSession(ctx, "old", "alice", RoleUser, now.Add(-time.Hour)); err != nil {
+	if err := db.CreateSession(ctx, ScopeGateway, "old", "alice", RoleUser, now.Add(-time.Hour)); err != nil {
 		t.Fatalf("CreateSession(old): %v", err)
 	}
-	if err := db.CreateSession(ctx, "fresh", "bob", RoleUser, now.Add(time.Hour)); err != nil {
+	if err := db.CreateSession(ctx, ScopeGateway, "fresh", "bob", RoleUser, now.Add(time.Hour)); err != nil {
 		t.Fatalf("CreateSession(fresh): %v", err)
 	}
 
@@ -65,14 +65,14 @@ func TestPruneSessions(t *testing.T) {
 	if removed != 1 {
 		t.Fatalf("removed = %d, want 1", removed)
 	}
-	if _, ok, _ := db.GetSession(ctx, "fresh", now); !ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeGateway, "fresh", now); !ok {
 		t.Fatal("the live session was pruned")
 	}
 
 	if err := db.DeleteSession(ctx, "fresh"); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
-	if _, ok, _ := db.GetSession(ctx, "fresh", now); ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeGateway, "fresh", now); ok {
 		t.Fatal("DeleteSession left the session behind")
 	}
 }
@@ -156,5 +156,29 @@ func TestGatesForRouteOrdering(t *testing.T) {
 	}
 	if len(other) != 1 || other[0].ID != wildcard.ID {
 		t.Fatalf("candidates for other = %+v", other)
+	}
+}
+
+// TestSessionScopesAreSeparate is the guarantee the two listeners rely on.
+func TestSessionScopesAreSeparate(t *testing.T) {
+	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
+	ctx := context.Background()
+	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	expires := now.Add(time.Hour)
+
+	if err := db.CreateSession(ctx, ScopeAdmin, "hash-boss", "boss", RoleAdmin, expires); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// The same token hash is only valid in the scope it was created for.
+	if _, ok, _ := db.GetSession(ctx, ScopeGateway, "hash-boss", now); ok {
+		t.Fatal("an admin session was accepted in the gateway scope")
+	}
+	if _, ok, _ := db.GetSession(ctx, ScopeAdmin, "hash-boss", now); !ok {
+		t.Fatal("the admin session was not found in its own scope")
+	}
+
+	if err := db.CreateSession(ctx, "nonsense", "hash-x", "alice", RoleUser, expires); err == nil {
+		t.Fatal("CreateSession accepted an unknown scope")
 	}
 }

@@ -196,9 +196,12 @@ func TestMigrationDropsGatewayRules(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 
-	// Rewind to v2 to simulate a database from the previous release.
-	if _, err := db.db.Exec(`DROP TABLE gate`); err != nil {
-		t.Fatalf("drop gate: %v", err)
+	// Rewind to v2 to simulate a database from the previous release: drop every
+	// table migration 3 and later created.
+	for _, table := range []string{"gate", "sessions"} {
+		if _, err := db.db.Exec(`DROP TABLE IF EXISTS ` + table); err != nil {
+			t.Fatalf("drop %s: %v", table, err)
+		}
 	}
 	if _, err := db.db.Exec(`CREATE TABLE gateway_rules (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -244,20 +244,14 @@ func (s *server) handleUnknownAPI(w http.ResponseWriter, _ *http.Request) {
 	s.writeError(w, http.StatusNotFound, "not_found", "unknown endpoint")
 }
 
-// currentSession resolves the session token carried by the request. The gateway
-// cookie is accepted as well, so signing in once at the portal also unlocks the
-// management area for an admin account (the role check still applies).
+// currentSession resolves the management session. Only the management cookie and
+// the admin scope are accepted: a portal session must never unlock /admin.
 func (s *server) currentSession(r *http.Request) (Session, bool) {
-	for _, name := range []string{SessionCookieName, gatewayCookieSecureName, gatewayCookiePlainName} {
-		cookie, err := r.Cookie(name)
-		if err != nil {
-			continue
-		}
-		if session, ok := s.sessions.Get(cookie.Value, s.now()); ok {
-			return session, true
-		}
+	cookie, err := r.Cookie(SessionCookieName)
+	if err != nil {
+		return Session{}, false
 	}
-	return Session{}, false
+	return s.sessions.Get(ScopeAdmin, cookie.Value, s.now())
 }
 
 func (s *server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {

@@ -88,6 +88,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS gate_scope_idx
 CREATE UNIQUE INDEX IF NOT EXISTS gate_global_idx
     ON gate (to_prefix, to_suffix) WHERE user_id IS NULL;
 `,
+
+	// 6: sessions become scoped. A management session and a gateway session are
+	// never interchangeable, so the portal cannot inherit an admin login and the
+	// management API cannot accept a portal cookie.
+	`
+ALTER TABLE sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'admin';
+CREATE INDEX IF NOT EXISTS sessions_scope_idx ON sessions (scope, expires_at);
+`,
 }
 
 // schemaVersion is how many migrations this build expects.

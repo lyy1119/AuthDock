@@ -216,6 +216,20 @@ Set-Cookie: __Secure-gateway_session=...; Domain=gw.example.net; Path=/;
 Sessions live in SQLite (`sessions` table, only a SHA-256 hash of the token is
 stored), so restarting AuthDock no longer signs everyone out.
 
+**The two ports are fully separated.**
+
+| | Management (`-addr`, 8080) | Gateway (`-gateway-addr`, 8081) |
+| --- | --- | --- |
+| Accepts | `admin` accounts only (`403 admin_only` otherwise) | ordinary accounts only (`403 user_only` otherwise) |
+| Cookie | `authdock_session`, host-only | `__Secure-gateway_session` / `gateway_session`, `Domain=` the gateway domain |
+| Session scope | `admin` | `gateway` |
+
+A session is bound to its scope in the database, so neither cookie is even
+recognised by the other port: signing in as an administrator at 8080 leaves the
+portal anonymous, and a portal session answers `401` from the management API.
+Both SQLite tables and both listeners can be moved to different hosts later
+without changing this rule.
+
 ## Pages
 
 | Listener / Path     | Description                                              |
@@ -247,7 +261,7 @@ is relative, which keeps the app working behind a path-prefixing reverse proxy
 | Method | Path          | Description                                              |
 | ------ | ------------- | -------------------------------------------------------- |
 | GET    | `/` `/login`  | User login page                                          |
-| POST   | `/api/login`  | `{"username","password"}`, any role                      |
+| POST   | `/api/login`  | `{"username","password","return_to"?}`, ordinary accounts only (`user_only` otherwise) |
 | POST   | `/api/logout` | Drops the session                                        |
 | GET    | `/api/session`| Reports the current session                              |
 
@@ -361,6 +375,9 @@ permissions because they contain password hashes.
 - Published services never see AuthDock's cookies, and cannot overwrite them.
 - `return_to` is validated against the gateway domain, so the login page cannot
   be used as an open redirect.
+- Management and gateway sessions are separate scopes in the database: an admin
+  cookie is worthless at the portal and a portal cookie is worthless at the
+  management API.
 - Passwords chosen in the admin area must be at least 8 bytes; resets store a
   fresh Argon2id hash and never return the old one.
 - Responses carry `X-Content-Type-Options`, `X-Frame-Options`,

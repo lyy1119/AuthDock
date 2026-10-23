@@ -474,3 +474,82 @@ func TestGatewaySessionSurvivesRestart(t *testing.T) {
 		t.Fatalf("request after \"restart\" = %d, want 200 (the session must survive)", rec.Code)
 	}
 }
+
+// TestGatewayIgnoresTheAdminSession keeps the two ports apart: signing in as an
+// administrator at the management port is not a gateway login.
+func TestGatewayIgnoresTheAdminSession(t *testing.T) {
+	env := newGatewayEnv(t, false)
+	upstream, _ := newUpstream(t, "svc")
+	env.gate(t, "svc", upstream.Listener.Addr().String(), "svc", "", nil)
+
+	payload, _ := json.Marshal(map[string]string{"username": "boss", "password": "bosspass12"})
+	loginReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/login", bytes.NewReader(payload))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	env.admin.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("admin login = %d, body = %s", loginRec.Code, loginRec.Body.String())
+	}
+
+	var adminCookie *http.Cookie
+	for _, cookie := range loginRec.Result().Cookies() {
+		if cookie.Name == SessionCookieName && cookie.Value != "" {
+			adminCookie = cookie
+		}
+	}
+	if adminCookie == nil {
+		t.Fatal("admin login produced no management cookie")
+	}
+
+	rec := requestAt(env.handler, http.MethodGet, "svc."+gatewayDomainName, "/", adminCookie, nil)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("gateway with a management cookie = %d, want 302 to the portal", rec.Code)
+	}
+	if location := rec.Header().Get("Location"); !strings.Contains(location, "/login?return_to=") {
+		t.Fatalf("Location = %q, want the portal login", location)
+	}
+}
+
+// TestGatewayPortalSessionUsesTheGatewayScope covers the bug where the portal
+// session endpoint answered with the management scope, so an administrator
+// signed in on the management port showed up as signed in at the portal.
+func TestGatewayPortalSessionUsesTheGatewayScope(t *testing.T) {
+	env := newGatewayEnv(t, false)
+
+	payload, _ := json.Marshal(map[string]string{"username": "boss", "password": "bosspass12"})
+	loginReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/login", bytes.NewReader(payload))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	env.admin.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("admin login = %d", loginRec.Code)
+	}
+	var adminCookie *http.Cookie
+	for _, cookie := range loginRec.Result().Cookies() {
+		if cookie.Name == SessionCookieName && cookie.Value != "" {
+			adminCookie = cookie
+		}
+	}
+	if adminCookie == nil {
+		t.Fatal("admin login produced no management cookie")
+	}
+
+	// The portal session endpoint must ignore the management cookie entirely.
+	rec := requestAt(env.handler, http.MethodGet, gatewayDomainName, "/api/session", adminCookie, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("portal /api/session with a management cookie = %d, want 401", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "boss") {
+		t.Fatalf("the portal leaked the administrator session: %s", rec.Body.String())
+	}
+
+	// And it does report a real portal session.
+	alice := env.login(t, "alice", alicePassword, "")
+	rec = requestAt(env.handler, http.MethodGet, gatewayDomainName, "/api/session", alice, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("portal /api/session with a portal cookie = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "alice") {
+		t.Fatalf("portal session body = %s", rec.Body.String())
+	}
+}

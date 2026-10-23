@@ -28,12 +28,22 @@ type Session struct {
 	ExpiresAt time.Time
 }
 
-// Sessions is the session backend. The gateway and the management API share it,
-// so one login covers both.
+// SessionScope separates the two audiences. A management session is never valid
+// at the gateway and a gateway session is never valid at the management API.
+type SessionScope string
+
+const (
+	// ScopeAdmin is the management area behind -addr.
+	ScopeAdmin SessionScope = "admin"
+	// ScopeGateway is the login portal and the published services.
+	ScopeGateway SessionScope = "gateway"
+)
+
+// Sessions is the session backend shared by both listeners, with scoped tokens.
 type Sessions interface {
-	Create(username, role string, now time.Time) (string, Session, error)
-	Get(token string, now time.Time) (Session, bool)
-	Delete(token string)
+	Create(scope SessionScope, username, role string, now time.Time) (string, Session, error)
+	Get(scope SessionScope, token string, now time.Time) (Session, bool)
+	Delete(scope SessionScope, token string)
 	TTL() time.Duration
 }
 
@@ -53,11 +63,16 @@ func hashSessionToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// SessionStore keeps sessions in memory. It backs the tests and the pure
-// portal listener; the binary uses DBSessions.
+type sessionKey struct {
+	scope SessionScope
+	token string
+}
+
+// SessionStore keeps sessions in memory. It backs the tests; the binary uses
+// DBSessions.
 type SessionStore struct {
 	mu       sync.Mutex
-	sessions map[string]Session
+	sessions map[sessionKey]Session
 	ttl      time.Duration
 }
 
@@ -67,7 +82,7 @@ func NewSessionStore(ttl time.Duration) *SessionStore {
 		ttl = 12 * time.Hour
 	}
 	return &SessionStore{
-		sessions: make(map[string]Session),
+		sessions: make(map[sessionKey]Session),
 		ttl:      ttl,
 	}
 }
@@ -75,8 +90,8 @@ func NewSessionStore(ttl time.Duration) *SessionStore {
 // TTL is how long a fresh session stays valid.
 func (s *SessionStore) TTL() time.Duration { return s.ttl }
 
-// Create stores a new session and returns its token.
-func (s *SessionStore) Create(username, role string, now time.Time) (string, Session, error) {
+// Create stores a new session for the given scope and returns its token.
+func (s *SessionStore) Create(scope SessionScope, username, role string, now time.Time) (string, Session, error) {
 	token, err := newSessionToken()
 	if err != nil {
 		return "", Session{}, err
@@ -90,40 +105,41 @@ func (s *SessionStore) Create(username, role string, now time.Time) (string, Ses
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
-	s.sessions[token] = session
+	s.sessions[sessionKey{scope: scope, token: token}] = session
 	return token, session, nil
 }
 
-// Get returns the session for token when it is still valid.
-func (s *SessionStore) Get(token string, now time.Time) (Session, bool) {
+// Get returns the session for token in the given scope when it is still valid.
+func (s *SessionStore) Get(scope SessionScope, token string, now time.Time) (Session, bool) {
 	if token == "" {
 		return Session{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	session, ok := s.sessions[token]
+	key := sessionKey{scope: scope, token: token}
+	session, ok := s.sessions[key]
 	if !ok {
 		return Session{}, false
 	}
 	if !now.Before(session.ExpiresAt) {
-		delete(s.sessions, token)
+		delete(s.sessions, key)
 		return Session{}, false
 	}
 	return session, true
 }
 
-// Delete drops the session for token, if any.
-func (s *SessionStore) Delete(token string) {
+// Delete drops the session for token in the given scope, if any.
+func (s *SessionStore) Delete(scope SessionScope, token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.sessions, token)
+	delete(s.sessions, sessionKey{scope: scope, token: token})
 }
 
 func (s *SessionStore) pruneLocked(now time.Time) {
-	for token, session := range s.sessions {
+	for key, session := range s.sessions {
 		if !now.Before(session.ExpiresAt) {
-			delete(s.sessions, token)
+			delete(s.sessions, key)
 		}
 	}
 }
@@ -146,32 +162,32 @@ func NewDBSessions(st *store.Store, ttl time.Duration) *DBSessions {
 // TTL is how long a fresh session stays valid.
 func (d *DBSessions) TTL() time.Duration { return d.ttl }
 
-// Create stores a new session and returns its token.
-func (d *DBSessions) Create(username, role string, now time.Time) (string, Session, error) {
+// Create stores a new session for the given scope and returns its token.
+func (d *DBSessions) Create(scope SessionScope, username, role string, now time.Time) (string, Session, error) {
 	token, err := newSessionToken()
 	if err != nil {
 		return "", Session{}, err
 	}
 	expires := now.Add(d.ttl)
-	if err := d.store.CreateSession(context.Background(), hashSessionToken(token), username, role, expires); err != nil {
+	if err := d.store.CreateSession(context.Background(), string(scope), hashSessionToken(token), username, role, expires); err != nil {
 		return "", Session{}, err
 	}
 	return token, Session{Username: username, Role: role, ExpiresAt: expires}, nil
 }
 
-// Get returns the session for token when it is still valid.
-func (d *DBSessions) Get(token string, now time.Time) (Session, bool) {
+// Get returns the session for token in the given scope when it is still valid.
+func (d *DBSessions) Get(scope SessionScope, token string, now time.Time) (Session, bool) {
 	if token == "" {
 		return Session{}, false
 	}
-	session, ok, err := d.store.GetSession(context.Background(), hashSessionToken(token), now)
+	session, ok, err := d.store.GetSession(context.Background(), string(scope), hashSessionToken(token), now)
 	if err != nil || !ok {
 		return Session{}, false
 	}
 	return Session{Username: session.Username, Role: session.Role, ExpiresAt: session.ExpiresAt}, true
 }
 
-// Delete drops the session for token, if any.
-func (d *DBSessions) Delete(token string) {
+// Delete drops the session for token in the given scope, if any.
+func (d *DBSessions) Delete(scope SessionScope, token string) {
 	_ = d.store.DeleteSession(context.Background(), hashSessionToken(token))
 }

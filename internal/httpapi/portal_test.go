@@ -225,12 +225,14 @@ func TestPortalLoginAcceptsNormalUser(t *testing.T) {
 		t.Fatalf("portal session = %d, body = %s", sessionRec.Code, sessionRec.Body.String())
 	}
 
+	// The two listeners are separated: a portal session is not a management
+	// session at all, so the management API does not even recognise it.
 	adminReq := httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
 	adminReq.AddCookie(cookie)
 	adminRec := httptest.NewRecorder()
 	env.admin.ServeHTTP(adminRec, adminReq)
-	if adminRec.Code != http.StatusForbidden {
-		t.Fatalf("admin API with a user session = %d, want 403", adminRec.Code)
+	if adminRec.Code != http.StatusUnauthorized {
+		t.Fatalf("admin API with a portal session = %d, want 401 (the scopes are separate)", adminRec.Code)
 	}
 }
 
@@ -260,7 +262,7 @@ func TestPortalLogout(t *testing.T) {
 	env := newPortalEnv(t, true, false)
 
 	login := portalRequest(t, env, http.MethodPost, "/api/login", portalDomain, map[string]string{
-		"username": "boss", "password": "bosspass12",
+		"username": "alice", "password": "alicepass1",
 	})
 	cookie := gatewayCookie(t, login)
 	if cookie == nil {
@@ -322,5 +324,44 @@ func TestPortalDropsTheConnectionForAWrongHost(t *testing.T) {
 	defer okResponse.Body.Close()
 	if okResponse.StatusCode != http.StatusOK {
 		t.Fatalf("correct Host = %d, want 200", okResponse.StatusCode)
+	}
+}
+
+func TestPortalRejectsAdministratorAccounts(t *testing.T) {
+	env := newPortalEnv(t, true, false)
+
+	rec := portalRequest(t, env, http.MethodPost, "/api/login", portalDomain, map[string]string{
+		"username": "boss", "password": "bosspass12",
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("admin login at the portal = %d, want 403", rec.Code)
+	}
+	if code := errorCode(t, rec); code != "user_only" {
+		t.Fatalf("error code = %q, want user_only", code)
+	}
+	if cookie := gatewayCookie(t, rec); cookie != nil {
+		t.Fatal("an administrator was given a portal session")
+	}
+}
+
+func TestPortalSessionIsNotAnAdminSession(t *testing.T) {
+	env := newPortalEnv(t, true, false)
+
+	// A normal account signs in at the portal...
+	login := portalRequest(t, env, http.MethodPost, "/api/login", portalDomain, map[string]string{
+		"username": "alice", "password": "alicepass1",
+	})
+	cookie := gatewayCookie(t, login)
+	if cookie == nil {
+		t.Fatal("portal login produced no cookie")
+	}
+
+	// ...and that cookie is worthless at the management port.
+	adminReq := httptest.NewRequest(http.MethodGet, "/api/auth/session", nil)
+	adminReq.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
+	adminRec := httptest.NewRecorder()
+	env.admin.ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusUnauthorized {
+		t.Fatalf("management session endpoint with a portal cookie = %d, want 401", adminRec.Code)
 	}
 }

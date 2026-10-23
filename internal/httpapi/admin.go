@@ -293,7 +293,7 @@ func (s *server) updateAdminUser(w http.ResponseWriter, r *http.Request, id int6
 	// Demoting the signed-in account ends its own admin session.
 	if roleChanged && updated.Username == session.Username && !updated.IsAdmin() {
 		if cookie, err := r.Cookie(SessionCookieName); err == nil {
-			s.sessions.Delete(cookie.Value)
+			s.sessions.Delete(ScopeAdmin, cookie.Value)
 		}
 		s.clearSessionCookie(w)
 		response.LoggedOut = true

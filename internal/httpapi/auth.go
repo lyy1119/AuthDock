@@ -115,7 +115,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, session, err := s.sessions.Create(user.Username, user.Role, now)
+	token, session, err := s.sessions.Create(ScopeAdmin, user.Username, user.Role, now)
 	if err != nil {
 		s.logger.Error("create session", "err", err)
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "服务器内部错误")
@@ -134,7 +134,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // handleLogout drops the session token, if the request carries one.
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(SessionCookieName); err == nil {
-		s.sessions.Delete(cookie.Value)
+		s.sessions.Delete(ScopeAdmin, cookie.Value)
 	}
 	s.clearSessionCookie(w)
 	s.writeJSON(w, http.StatusOK, logoutResponse{OK: true})

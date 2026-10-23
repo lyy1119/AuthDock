@@ -158,7 +158,16 @@ func (s *server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 
 	s.limiter.Reset(req.Username)
 
-	token, session, err := s.sessions.Create(user.Username, user.Role, now)
+	// The portal is for the people the pedestal serves. Administrators belong to
+	// the management area, which is a different listener and a different session.
+	if user.IsAdmin() {
+		s.logger.Warn("portal login rejected", "username", user.Username, "reason", "admin_account",
+			"remote", r.RemoteAddr)
+		s.writeError(w, http.StatusForbidden, "user_only", "管理员账号请在管理端登录，此页面只接受普通账号")
+		return
+	}
+
+	token, session, err := s.sessions.Create(ScopeGateway, user.Username, user.Role, now)
 	if err != nil {
 		s.internalError(w, "create portal session", err)
 		return
@@ -184,11 +193,8 @@ func (s *server) handlePortalLogout(w http.ResponseWriter, r *http.Request) {
 
 	for _, name := range []string{gatewayCookieSecureName, gatewayCookiePlainName} {
 		if cookie, err := r.Cookie(name); err == nil {
-			s.sessions.Delete(cookie.Value)
+			s.sessions.Delete(ScopeGateway, cookie.Value)
 		}
-	}
-	if cookie, err := r.Cookie(SessionCookieName); err == nil {
-		s.sessions.Delete(cookie.Value)
 	}
 
 	s.clearGatewayCookie(w, r, domain)
@@ -200,11 +206,6 @@ func (s *server) handlePortalSession(w http.ResponseWriter, r *http.Request) {
 	domain := gatewayDomainFrom(r)
 
 	session, ok := s.gatewaySession(r)
-	if !ok {
-		if legacy, legacyOK := s.currentSession(r); legacyOK {
-			session, ok = legacy, true
-		}
-	}
 	if !ok {
 		s.writeError(w, http.StatusUnauthorized, "unauthenticated", "尚未登录或会话已过期")
 		return

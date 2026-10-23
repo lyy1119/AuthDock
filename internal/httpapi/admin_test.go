@@ -84,7 +84,7 @@ func TestAdminAPIRequiresSession(t *testing.T) {
 func TestAdminAPIRequiresAdminRole(t *testing.T) {
 	env := newTestEnv(t)
 
-	token, _, err := env.sessions.Create(testPlainUsername, store.RoleUser, env.clock.Now())
+	token, _, err := env.sessions.Create(ScopeAdmin, testPlainUsername, store.RoleUser, env.clock.Now())
 	if err != nil {
 		t.Fatalf("create user session: %v", err)
 	}

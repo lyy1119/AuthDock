@@ -118,7 +118,8 @@ func (s *server) servePortalRoutes(w http.ResponseWriter, r *http.Request, domai
 	case "/api/logout":
 		s.onlyMethod(http.MethodPost, s.handlePortalLogout)(w, r)
 	case "/api/session":
-		s.onlyMethod(http.MethodGet, s.handleSession)(w, r)
+		// The portal reports the gateway session, never the management one.
+		s.onlyMethod(http.MethodGet, s.handlePortalSession)(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -193,9 +194,20 @@ func chooseGate(candidates []store.Gate, path string, userID int64) (gate *store
 	return nil, "", false, matchedAny
 }
 
-// gatewaySession resolves the session carried by the request at the gateway.
+// gatewaySession resolves the gateway session. Only the gateway cookies and the
+// gateway scope are accepted, so an administrator signed in at the management
+// port is still anonymous here.
 func (s *server) gatewaySession(r *http.Request) (Session, bool) {
-	return s.currentSession(r)
+	for _, name := range []string{gatewayCookieSecureName, gatewayCookiePlainName} {
+		cookie, err := r.Cookie(name)
+		if err != nil {
+			continue
+		}
+		if session, ok := s.sessions.Get(ScopeGateway, cookie.Value, s.now()); ok {
+			return session, true
+		}
+	}
+	return Session{}, false
 }
 
 func (s *server) setGatewayCookie(w http.ResponseWriter, r *http.Request, domain, token string, expires time.Time) {
