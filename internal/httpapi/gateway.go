@@ -170,47 +170,32 @@ func (s *server) serveGatedRequest(w http.ResponseWriter, r *http.Request, prefi
 	}
 
 	gate, rest, found, matchedAny := chooseGate(candidates, r.URL.Path, user.ID)
-	switch {
-	case found:
-		s.logger.Info("gateway forwarding", "gate", gate.Name, "user", user.Username,
-			"host", requestHost(r), "path", r.URL.Path, "upstream", gate.From)
-		s.proxyGate(w, r, *gate, rest)
-	case matchedAny:
-		// The address exists but belongs to another account.
-		s.logger.Warn("gateway address belongs to another account",
-			"host", requestHost(r), "path", r.URL.Path, "user", user.Username)
-		s.writeGatePage(w, r, http.StatusForbidden, domain, user,
-			"这个地址属于其他账号",
-			"你已登录为 "+user.Username+"，但这个地址的网关归属于其他账号，因此不能访问。")
-	default:
-		s.logger.Warn("gateway address has no gate",
-			"host", requestHost(r), "path", r.URL.Path, "user", user.Username)
-		s.writeGatePage(w, r, http.StatusNotFound, domain, user,
-			"这个地址没有配置网关",
-			"网关域名下没有与 "+requestHost(r)+" 匹配的网关，或者该网关的路径前缀与 "+r.URL.Path+" 不符。")
+	if !found {
+		// Whether the address belongs to another account or to nobody is
+		// deliberately indistinguishable to the visitor: telling them "this
+		// belongs to someone else" would disclose the routes of other accounts.
+		if matchedAny {
+			s.logger.Warn("gateway address belongs to another account",
+				"host", requestHost(r), "path", r.URL.Path, "user", user.Username)
+		} else {
+			s.logger.Warn("gateway address has no gate",
+				"host", requestHost(r), "path", r.URL.Path, "user", user.Username)
+		}
+		s.writeNoRoutePage(w, r, domain, user)
+		return
 	}
+
+	s.logger.Info("gateway forwarding", "gate", gate.Name, "user", user.Username,
+		"host", requestHost(r), "path", r.URL.Path, "upstream", gate.From)
+	s.proxyGate(w, r, *gate, rest)
 }
 
-// writeGatePage explains a 403/404 at a published address and lists what the
-// signed-in account can reach, which turns a silent failure into something the
-// visitor can act on.
-func (s *server) writeGatePage(w http.ResponseWriter, r *http.Request, status int, domain string, user *store.User, title, detail string) {
-	addresses := []string{}
-	if user != nil {
-		addresses = s.accountAddresses(r, *user, domain)
-	}
-
-	var list strings.Builder
-	if len(addresses) == 0 {
-		list.WriteString("<p class=\"muted\">你的账号目前还没有可访问的网关。</p>")
-	} else {
-		list.WriteString("<ul>")
-		for _, address := range addresses {
-			list.WriteString("<li><a href=\"" + html.EscapeString(address) + "\">" + html.EscapeString(address) + "</a></li>")
-		}
-		list.WriteString("</ul>")
-	}
-
+// writeNoRoutePage is the single answer for "this address does not resolve for
+// you": the same page and status whether the address belongs to another account
+// or to nobody, so visitors cannot enumerate the routes of other accounts. It
+// offers a way back to the portal, which lists what this account can reach.
+func (s *server) writeNoRoutePage(w http.ResponseWriter, r *http.Request, domain string, user *store.User) {
+	portalURL := fmt.Sprintf("%s://%s/", requestProto(r), domain)
 	account := "(未登录)"
 	if user != nil {
 		account = user.Username
@@ -218,22 +203,28 @@ func (s *server) writeGatePage(w http.ResponseWriter, r *http.Request, status in
 
 	body := "<!DOCTYPE html><html lang=\"zh-CN\" data-theme=\"" + s.pageTheme(r) + "\"><head><meta charset=\"utf-8\">" +
 		"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
-		"<title>" + html.EscapeString(title) + "</title><style>" +
+		"<title>这个地址暂时不可用</title><style>" +
 		pageThemeCSS +
 		"main{width:min(100%,34rem);padding:1.75rem;background:var(--card);border:1px solid var(--border);border-radius:14px}" +
-		"h1{margin:0 0 .5rem;font-size:1.2rem}p{margin:.4rem 0;line-height:1.6}" +
-		".muted{color:var(--muted);font-size:.9rem}ul{margin:.6rem 0 0;padding-left:1.2rem;line-height:1.8}" +
-		"a{color:var(--accent)}code{background:var(--panel);padding:.1rem .35rem;border-radius:4px}</style></head><body><main>" +
-		"<h1>" + html.EscapeString(title) + "</h1>" +
-		"<p>" + html.EscapeString(detail) + "</p>" +
-		"<p class=\"muted\">当前账号：<code>" + html.EscapeString(account) + "</code>　" +
-		"请求地址：<code>" + html.EscapeString(requestAuthority(r)+r.URL.RequestURI()) + "</code></p>" +
-		"<p class=\"muted\">" + "你可以访问：" + "</p>" + list.String() +
-		"</main></body></html>"
+		"h1{margin:0 0 .6rem;font-size:1.15rem}p{margin:.4rem 0;line-height:1.7}" +
+		".muted{color:var(--muted);font-size:.9rem}" +
+		".actions{margin-top:1.2rem;display:flex;gap:.6rem;flex-wrap:wrap}" +
+		".button{display:inline-block;padding:.55rem 1.1rem;font-size:.95rem;font-weight:600;text-decoration:none;" +
+		"color:#fff;background:var(--accent);border-radius:9px}" +
+		".button.ghost{color:var(--accent);background:transparent;border:1px solid var(--accent)}" +
+		"code{background:var(--panel);padding:.1rem .35rem;border-radius:4px}</style></head><body><main>" +
+		"<h1>这个地址暂时不可用</h1>" +
+		"<p>当前账号 <code>" + html.EscapeString(account) + "</code> 没有通往 " +
+		"<code>" + html.EscapeString(requestAuthority(r)+r.URL.RequestURI()) + "</code> 的网关。</p>" +
+		"<p class=\"muted\">如果你认为这不应该发生，请联系管理员为你的账号添加对应的网关规则。</p>" +
+		"<div class=\"actions\">" +
+		"<a class=\"button\" href=\"" + html.EscapeString(portalURL) + "\">返回登录状态页</a>" +
+		"<a class=\"button ghost\" href=\"" + html.EscapeString(portalURL+"login") + "\">换一个账号登录</a>" +
+		"</div></main></body></html>"
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusNotFound)
 	_, _ = io.WriteString(w, body)
 }
 

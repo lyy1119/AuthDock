@@ -333,19 +333,6 @@ func TestGatewayKeepsUpstreamCookies(t *testing.T) {
 	}
 }
 
-func TestGatewayForbidsAnotherUsersGate(t *testing.T) {
-	env := newGatewayEnv(t, false)
-	upstream, _ := newUpstream(t, "bob-only")
-	bobID := env.userID(t, "bob")
-	env.gate(t, "bob only", upstream.Listener.Addr().String(), "private", "", &bobID)
-
-	aliceCookie := env.login(t, "alice", alicePassword, "")
-	rec := requestAt(env.handler, http.MethodGet, "private."+gatewayDomainName, "/", aliceCookie, nil)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("alice on bob's gate = %d, want 403", rec.Code)
-	}
-}
-
 func TestGatewayGlobalGateIsVisibleToEveryAccount(t *testing.T) {
 	env := newGatewayEnv(t, false)
 	upstream, _ := newUpstream(t, "public")
@@ -597,31 +584,50 @@ func TestGatewayExplainsAMissingGate(t *testing.T) {
 		t.Fatalf("missing gate = %d, want 404", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "没有配置网关") {
-		t.Fatalf("the 404 page does not explain the problem: %s", body)
+	if !strings.Contains(body, "这个地址暂时不可用") {
+		t.Fatalf("the page does not use the neutral wording: %s", body)
 	}
-	// It lists what this account can reach, which is the actionable part.
-	if !strings.Contains(body, "https://calendar."+gatewayDomainName+"/") {
-		t.Fatalf("the 404 page does not list the account's addresses: %s", body)
+	// A way back to the portal, which is where the account's own addresses live.
+	if !strings.Contains(body, "http://"+gatewayDomainName+"/") {
+		t.Fatalf("the page does not link back to the portal: %s", body)
 	}
 	if !strings.Contains(body, "alice") {
-		t.Fatalf("the 404 page does not name the account: %s", body)
+		t.Fatalf("the page does not name the signed-in account: %s", body)
 	}
 }
 
-func TestGatewayExplainsAnotherAccountsGate(t *testing.T) {
+// TestGatewayDoesNotDiscloseForeignRoutes is the privacy rule: an address that
+// belongs to another account must look exactly like an address nobody uses.
+func TestGatewayDoesNotDiscloseForeignRoutes(t *testing.T) {
 	env := newGatewayEnv(t, false)
 	upstream, _ := newUpstream(t, "bob-only")
 	bobID := env.userID(t, "bob")
 	env.gate(t, "bob only", upstream.Listener.Addr().String(), "private", "", &bobID)
 
 	aliceCookie := env.login(t, "alice", alicePassword, "")
-	rec := requestAt(env.handler, http.MethodGet, "private."+gatewayDomainName, "/", aliceCookie, nil)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("another account's gate = %d, want 403", rec.Code)
+
+	foreign := requestAt(env.handler, http.MethodGet, "private."+gatewayDomainName, "/", aliceCookie, nil)
+	missing := requestAt(env.handler, http.MethodGet, "nothing."+gatewayDomainName, "/", aliceCookie, nil)
+
+	if foreign.Code != http.StatusNotFound {
+		t.Fatalf("another account's address = %d, want 404 (same as a missing one)", foreign.Code)
 	}
-	if body := rec.Body.String(); !strings.Contains(body, "属于其他账号") {
-		t.Fatalf("the 403 page does not explain the problem: %s", body)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing address = %d, want 404", missing.Code)
+	}
+
+	// The two responses must agree on everything except the requested address, so
+	// ownership cannot be inferred from the status or the wording.
+	foreignBody := strings.ReplaceAll(foreign.Body.String(), "private."+gatewayDomainName, "HOST")
+	missingBody := strings.ReplaceAll(missing.Body.String(), "nothing."+gatewayDomainName, "HOST")
+	if foreignBody != missingBody {
+		t.Fatalf("the two answers differ, which discloses ownership:\n%s\n---\n%s", foreignBody, missingBody)
+	}
+
+	for _, forbidden := range []string{"属于其他账号", "其他用户", "bob", "归属于"} {
+		if strings.Contains(foreign.Body.String(), forbidden) {
+			t.Fatalf("the page leaks %q: %s", forbidden, foreign.Body.String())
+		}
 	}
 }
 

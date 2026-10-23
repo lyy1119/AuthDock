@@ -225,7 +225,7 @@
       var response = await fetch(sessionEndpoint, { credentials: 'same-origin', headers: { Accept: 'application/json' } });
       if (!response.ok) return;
       var data = await response.json();
-      if (data && data.ok && data.user) showSession(data.user);
+      if (data && data.ok && data.user) showSession(data.user, data.addresses);
     } catch (err) {
       /* Not signed in yet: the form is already visible. */
     }

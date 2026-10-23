@@ -264,10 +264,16 @@ func (s *server) handlePortalSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	addresses := []string{}
+	if user, err := s.store.GetUserByUsername(r.Context(), session.Username); err == nil {
+		addresses = s.accountAddresses(r, *user, domain)
+	}
+
 	s.writeJSON(w, http.StatusOK, portalSessionResponse{
 		OK:        true,
 		User:      &userPayload{Username: session.Username, Role: session.Role},
 		ExpiresAt: session.ExpiresAt.UTC().Format(time.RFC3339),
 		Domain:    domain,
+		Addresses: addresses,
 	})
 }

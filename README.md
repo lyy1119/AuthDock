@@ -203,9 +203,12 @@ path prefix beats a shorter one. `to_suffix` is stripped before forwarding, so
 `app.gw.example.net/tools/deep` with `to_suffix = tools` reaches the upstream as
 `/deep`.
 
-Answers: the right gate is proxied; an address that exists but belongs to
-another account gets `403`; an address with no gate at all gets `404` — both
-with a page that names the account and lists the addresses it can reach. A
+Answers: the right gate is proxied. Anything else — an address that belongs to
+another account, or an address nobody published — gets the **same** `404` page,
+so a visitor cannot learn which routes other accounts have registered. That page
+names the signed-in account, explains that it has no route to this address, and
+offers a button back to the portal, which lists the addresses the account can
+actually reach. A
 visitor without a session is redirected to the portal
 (`https://gw.example.net/login?return_to=<original URL>`).
 
