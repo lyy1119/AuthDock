@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/lyy1119/AuthDock/internal/passwd"
 	"github.com/lyy1119/AuthDock/internal/store"
@@ -344,6 +345,30 @@ func (s *server) deleteAdminUser(w http.ResponseWriter, r *http.Request, id int6
 	}
 	s.logger.Info("admin deleted user", "username", target.Username, "by", session.Username)
 	s.writeJSON(w, http.StatusOK, adminOKResponse{OK: true})
+}
+
+// handleAdminTokenRefresh exchanges a management refresh token for a new pair.
+func (s *server) handleAdminTokenRefresh(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if !s.decodeAdminJSON(w, r, &body) {
+		return
+	}
+
+	issued, err := s.sessions.Refresh(ScopeAdmin, body.RefreshToken, s.now())
+	if err != nil {
+		s.logger.Warn("management refresh rejected", "remote", r.RemoteAddr)
+		s.writeError(w, http.StatusUnauthorized, "invalid_refresh_token", "刷新令牌无效或已过期，请重新登录")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, tokenPairResponse{
+		OK:               true,
+		Token:            issued.Access,
+		ExpiresAt:        issued.AccessExpiry.UTC().Format(time.RFC3339),
+		RefreshToken:     issued.Refresh,
+		RefreshExpiresAt: issued.RefreshExpiry.UTC().Format(time.RFC3339),
+	})
 }
 
 // ── settings ───────────────────────────────────────────────────────────

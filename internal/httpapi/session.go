@@ -18,8 +18,16 @@ import (
 // gateway publishes.
 const SessionCookieName = "authdock_session"
 
-// ErrSessionToken reports a failure while generating a random token.
-var ErrSessionToken = errors.New("httpapi: cannot generate session token")
+// DefaultRefreshTTL is how long a refresh token stays usable.
+const DefaultRefreshTTL = 30 * 24 * time.Hour
+
+var (
+	// ErrSessionToken reports a failure while generating a random token.
+	ErrSessionToken = errors.New("httpapi: cannot generate session token")
+	// ErrRefreshInvalid reports a refresh token that is unknown, already used or
+	// expired.
+	ErrRefreshInvalid = errors.New("httpapi: refresh token is not usable")
+)
 
 // Session is an authenticated account session.
 type Session struct {
@@ -39,12 +47,26 @@ const (
 	ScopeGateway SessionScope = "gateway"
 )
 
+// Issued is the token pair handed out by a login or a refresh.
+type Issued struct {
+	Access        string
+	Refresh       string
+	AccessExpiry  time.Time
+	RefreshExpiry time.Time
+}
+
 // Sessions is the session backend shared by both listeners, with scoped tokens.
+//
+// A login hands out an access token (short lived, presented on every request)
+// and a refresh token (long lived, exchanged exactly once for a new pair).
 type Sessions interface {
-	Create(scope SessionScope, username, role string, now time.Time) (string, Session, error)
+	Issue(scope SessionScope, username, role string, now time.Time) (Issued, error)
+	Refresh(scope SessionScope, refreshToken string, now time.Time) (Issued, error)
 	Get(scope SessionScope, token string, now time.Time) (Session, bool)
+	// Delete revokes the whole login the token belongs to, refresh token included.
 	Delete(scope SessionScope, token string)
 	TTL() time.Duration
+	RefreshTTL() time.Duration
 }
 
 // newSessionToken returns a fresh opaque token.
@@ -63,53 +85,129 @@ func hashSessionToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ── in-memory backend (tests) ───────────────────────────────────────────
+
 type sessionKey struct {
 	scope SessionScope
 	token string
 }
 
+type sessionRow struct {
+	session Session
+	kind    string
+	family  string
+}
+
 // SessionStore keeps sessions in memory. It backs the tests; the binary uses
 // DBSessions.
 type SessionStore struct {
-	mu       sync.Mutex
-	sessions map[sessionKey]Session
-	ttl      time.Duration
+	mu         sync.Mutex
+	rows       map[sessionKey]sessionRow
+	ttl        time.Duration
+	refreshTTL time.Duration
 }
 
-// NewSessionStore returns an in-memory store whose sessions live for ttl.
-func NewSessionStore(ttl time.Duration) *SessionStore {
+// NewSessionStore returns an in-memory store with the given lifetimes.
+func NewSessionStore(ttl, refreshTTL time.Duration) *SessionStore {
 	if ttl <= 0 {
 		ttl = 12 * time.Hour
 	}
+	if refreshTTL <= 0 {
+		refreshTTL = DefaultRefreshTTL
+	}
 	return &SessionStore{
-		sessions: make(map[sessionKey]Session),
-		ttl:      ttl,
+		rows:       make(map[sessionKey]sessionRow),
+		ttl:        ttl,
+		refreshTTL: refreshTTL,
 	}
 }
 
-// TTL is how long a fresh session stays valid.
+// TTL is how long a fresh access token stays valid.
 func (s *SessionStore) TTL() time.Duration { return s.ttl }
 
-// Create stores a new session for the given scope and returns its token.
-func (s *SessionStore) Create(scope SessionScope, username, role string, now time.Time) (string, Session, error) {
-	token, err := newSessionToken()
+// RefreshTTL is how long a fresh refresh token stays valid.
+func (s *SessionStore) RefreshTTL() time.Duration { return s.refreshTTL }
+
+// Issue creates a new login and returns its token pair.
+func (s *SessionStore) Issue(scope SessionScope, username, role string, now time.Time) (Issued, error) {
+	access, err := newSessionToken()
 	if err != nil {
-		return "", Session{}, err
+		return Issued{}, err
 	}
-	session := Session{
-		Username:  username,
-		Role:      role,
-		ExpiresAt: now.Add(s.ttl),
+	refresh, err := newSessionToken()
+	if err != nil {
+		return Issued{}, err
+	}
+
+	session := Session{Username: username, Role: role, ExpiresAt: now.Add(s.ttl)}
+	issued := Issued{
+		Access:        access,
+		Refresh:       refresh,
+		AccessExpiry:  session.ExpiresAt,
+		RefreshExpiry: now.Add(s.refreshTTL),
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
-	s.sessions[sessionKey{scope: scope, token: token}] = session
-	return token, session, nil
+	s.rows[sessionKey{scope, access}] = sessionRow{session: session, kind: store.SessionKindAccess, family: access}
+	s.rows[sessionKey{scope, refresh}] = sessionRow{
+		session: Session{Username: username, Role: role, ExpiresAt: issued.RefreshExpiry},
+		kind:    store.SessionKindRefresh,
+		family:  access,
+	}
+	return issued, nil
 }
 
-// Get returns the session for token in the given scope when it is still valid.
+// Refresh consumes a refresh token and returns a new pair.
+func (s *SessionStore) Refresh(scope SessionScope, refreshToken string, now time.Time) (Issued, error) {
+	if refreshToken == "" {
+		return Issued{}, ErrRefreshInvalid
+	}
+
+	s.mu.Lock()
+	key := sessionKey{scope, refreshToken}
+	row, ok := s.rows[key]
+	if !ok || row.kind != store.SessionKindRefresh || !now.Before(row.session.ExpiresAt) {
+		delete(s.rows, key)
+		s.mu.Unlock()
+		return Issued{}, ErrRefreshInvalid
+	}
+	delete(s.rows, key)
+	username, role := row.session.Username, row.session.Role
+	s.mu.Unlock()
+
+	access, err := newSessionToken()
+	if err != nil {
+		return Issued{}, err
+	}
+	refresh, err := newSessionToken()
+	if err != nil {
+		return Issued{}, err
+	}
+	issued := Issued{
+		Access:        access,
+		Refresh:       refresh,
+		AccessExpiry:  now.Add(s.ttl),
+		RefreshExpiry: now.Add(s.refreshTTL),
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rows[sessionKey{scope, access}] = sessionRow{
+		session: Session{Username: username, Role: role, ExpiresAt: issued.AccessExpiry},
+		kind:    store.SessionKindAccess,
+		family:  row.family,
+	}
+	s.rows[sessionKey{scope, refresh}] = sessionRow{
+		session: Session{Username: username, Role: role, ExpiresAt: issued.RefreshExpiry},
+		kind:    store.SessionKindRefresh,
+		family:  row.family,
+	}
+	return issued, nil
+}
+
+// Get returns the access session for token in the given scope when it is valid.
 func (s *SessionStore) Get(scope SessionScope, token string, now time.Time) (Session, bool) {
 	if token == "" {
 		return Session{}, false
@@ -117,77 +215,143 @@ func (s *SessionStore) Get(scope SessionScope, token string, now time.Time) (Ses
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := sessionKey{scope: scope, token: token}
-	session, ok := s.sessions[key]
-	if !ok {
+	key := sessionKey{scope, token}
+	row, ok := s.rows[key]
+	if !ok || row.kind != store.SessionKindAccess {
 		return Session{}, false
 	}
-	if !now.Before(session.ExpiresAt) {
-		delete(s.sessions, key)
+	if !now.Before(row.session.ExpiresAt) {
+		delete(s.rows, key)
 		return Session{}, false
 	}
-	return session, true
+	return row.session, true
 }
 
-// Delete drops the session for token in the given scope, if any.
+// Delete revokes every token of the login the given token belongs to.
 func (s *SessionStore) Delete(scope SessionScope, token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.sessions, sessionKey{scope: scope, token: token})
-}
 
-func (s *SessionStore) pruneLocked(now time.Time) {
-	for key, session := range s.sessions {
-		if !now.Before(session.ExpiresAt) {
-			delete(s.sessions, key)
+	row, ok := s.rows[sessionKey{scope, token}]
+	if !ok {
+		return
+	}
+	for key, candidate := range s.rows {
+		if key.scope == scope && candidate.family == row.family {
+			delete(s.rows, key)
 		}
 	}
 }
 
+func (s *SessionStore) pruneLocked(now time.Time) {
+	for key, row := range s.rows {
+		if !now.Before(row.session.ExpiresAt) {
+			delete(s.rows, key)
+		}
+	}
+}
+
+// ── database backend ────────────────────────────────────────────────────
+
 // DBSessions persists sessions in SQLite, so restarting AuthDock no longer signs
 // everybody out and the gateway can grow to more than one process later.
 type DBSessions struct {
-	store *store.Store
-	ttl   time.Duration
+	store      *store.Store
+	ttl        time.Duration
+	refreshTTL time.Duration
 }
 
 // NewDBSessions returns a database backed session store.
-func NewDBSessions(st *store.Store, ttl time.Duration) *DBSessions {
+func NewDBSessions(st *store.Store, ttl, refreshTTL time.Duration) *DBSessions {
 	if ttl <= 0 {
 		ttl = 12 * time.Hour
 	}
-	return &DBSessions{store: st, ttl: ttl}
+	if refreshTTL <= 0 {
+		refreshTTL = DefaultRefreshTTL
+	}
+	return &DBSessions{store: st, ttl: ttl, refreshTTL: refreshTTL}
 }
 
-// TTL is how long a fresh session stays valid.
+// TTL is how long a fresh access token stays valid.
 func (d *DBSessions) TTL() time.Duration { return d.ttl }
 
-// Create stores a new session for the given scope and returns its token.
-func (d *DBSessions) Create(scope SessionScope, username, role string, now time.Time) (string, Session, error) {
-	token, err := newSessionToken()
+// RefreshTTL is how long a fresh refresh token stays valid.
+func (d *DBSessions) RefreshTTL() time.Duration { return d.refreshTTL }
+
+// Issue creates a new login and returns its token pair.
+func (d *DBSessions) Issue(scope SessionScope, username, role string, now time.Time) (Issued, error) {
+	access, err := newSessionToken()
 	if err != nil {
-		return "", Session{}, err
+		return Issued{}, err
 	}
-	expires := now.Add(d.ttl)
-	if err := d.store.CreateSession(context.Background(), string(scope), hashSessionToken(token), username, role, expires); err != nil {
-		return "", Session{}, err
+	refresh, err := newSessionToken()
+	if err != nil {
+		return Issued{}, err
 	}
-	return token, Session{Username: username, Role: role, ExpiresAt: expires}, nil
+
+	ctx := context.Background()
+	accessExpiry := now.Add(d.ttl)
+	refreshExpiry := now.Add(d.refreshTTL)
+	family := hashSessionToken(access)
+
+	if err := d.store.CreateSession(ctx, string(scope), store.SessionKindAccess,
+		hashSessionToken(access), username, role, family, accessExpiry); err != nil {
+		return Issued{}, err
+	}
+	if err := d.store.CreateSession(ctx, string(scope), store.SessionKindRefresh,
+		hashSessionToken(refresh), username, role, family, refreshExpiry); err != nil {
+		return Issued{}, err
+	}
+	return Issued{Access: access, Refresh: refresh, AccessExpiry: accessExpiry, RefreshExpiry: refreshExpiry}, nil
 }
 
-// Get returns the session for token in the given scope when it is still valid.
+// Refresh consumes a refresh token and returns a new pair.
+func (d *DBSessions) Refresh(scope SessionScope, refreshToken string, now time.Time) (Issued, error) {
+	if refreshToken == "" {
+		return Issued{}, ErrRefreshInvalid
+	}
+	access, err := newSessionToken()
+	if err != nil {
+		return Issued{}, err
+	}
+	refresh, err := newSessionToken()
+	if err != nil {
+		return Issued{}, err
+	}
+
+	accessExpiry := now.Add(d.ttl)
+	refreshExpiry := now.Add(d.refreshTTL)
+
+	session, ok, err := d.store.RotateRefreshSession(context.Background(), string(scope),
+		hashSessionToken(refreshToken), hashSessionToken(refresh), hashSessionToken(access),
+		accessExpiry, refreshExpiry, now)
+	if err != nil {
+		return Issued{}, err
+	}
+	if !ok {
+		return Issued{}, ErrRefreshInvalid
+	}
+	_ = session
+	return Issued{Access: access, Refresh: refresh, AccessExpiry: accessExpiry, RefreshExpiry: refreshExpiry}, nil
+}
+
+// Get returns the access session for token in the given scope when it is valid.
 func (d *DBSessions) Get(scope SessionScope, token string, now time.Time) (Session, bool) {
 	if token == "" {
 		return Session{}, false
 	}
-	session, ok, err := d.store.GetSession(context.Background(), string(scope), hashSessionToken(token), now)
+	session, ok, err := d.store.GetSession(context.Background(), string(scope),
+		store.SessionKindAccess, hashSessionToken(token), now)
 	if err != nil || !ok {
 		return Session{}, false
 	}
 	return Session{Username: session.Username, Role: session.Role, ExpiresAt: session.ExpiresAt}, true
 }
 
-// Delete drops the session for token in the given scope, if any.
+// Delete revokes every token of the login the given token belongs to.
 func (d *DBSessions) Delete(scope SessionScope, token string) {
-	_ = d.store.DeleteSession(context.Background(), hashSessionToken(token))
+	if token == "" {
+		return
+	}
+	_ = d.store.RevokeSessionFamily(context.Background(), hashSessionToken(token))
 }

@@ -96,6 +96,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS gate_global_idx
 ALTER TABLE sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'admin';
 CREATE INDEX IF NOT EXISTS sessions_scope_idx ON sessions (scope, expires_at);
 `,
+
+	// 7: sessions gain a kind and a family. "access" rows are what a request
+	// presents; "refresh" rows are exchanged for a new pair. Every row of one
+	// login shares a family, so signing out revokes the whole chain. Existing
+	// rows become access sessions, each its own family.
+	`
+ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'access';
+ALTER TABLE sessions ADD COLUMN family TEXT NOT NULL DEFAULT '';
+UPDATE sessions SET family = token_hash WHERE family = '';
+CREATE INDEX IF NOT EXISTS sessions_family_idx ON sessions (family);
+CREATE INDEX IF NOT EXISTS sessions_kind_idx ON sessions (scope, kind, expires_at);
+`,
 }
 
 // schemaVersion is how many migrations this build expects.

@@ -64,7 +64,7 @@ func newPortalEnv(t *testing.T, withDomain bool, noDNCheck bool) *portalEnv {
 	// Both handlers share one session store, exactly like the two listeners do.
 	options := Options{
 		Store:     db,
-		Sessions:  NewSessionStore(DefaultSessionTTL),
+		Sessions:  NewSessionStore(DefaultSessionTTL, DefaultRefreshTTL),
 		Now:       clock.Now,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		NoDNCheck: noDNCheck,

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lyy1119/AuthDock/internal/store"
 )
@@ -175,4 +176,146 @@ func adminLoginToken(t *testing.T, env *gatewayEnv) string {
 		t.Fatalf("decode: %v", err)
 	}
 	return body.Token
+}
+
+// postJSONTo posts a JSON body with an explicit Host and returns the recorder.
+func postJSONTo(handler http.Handler, host, path string, body any) *httptest.ResponseRecorder {
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "http://"+host+path, bytes.NewReader(payload))
+	req.Host = host
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestRefreshTokenRotation(t *testing.T) {
+	env := newGatewayEnv(t, false)
+	upstream, _ := newUpstream(t, "svc")
+	env.gate(t, "svc", upstream.Listener.Addr().String(), "svc", "", nil)
+
+	login := nativeLogin(t, env, "alice", alicePassword)
+	if login.RefreshToken == "" {
+		t.Fatal("the portal login returned no refresh token")
+	}
+	if login.RefreshExpiresAt == "" {
+		t.Fatal("the portal login returned no refresh expiry")
+	}
+
+	refreshed := postJSONTo(env.handler, gatewayDomainName, "/api/token", map[string]string{
+		"refresh_token": login.RefreshToken,
+	})
+	if refreshed.Code != http.StatusOK {
+		t.Fatalf("refresh = %d, body = %s", refreshed.Code, refreshed.Body.String())
+	}
+	var pair tokenPairResponse
+	if err := json.Unmarshal(refreshed.Body.Bytes(), &pair); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if pair.Token == "" || pair.RefreshToken == "" {
+		t.Fatalf("refresh returned an incomplete pair: %+v", pair)
+	}
+	if pair.RefreshToken == login.RefreshToken {
+		t.Fatal("the refresh token was not rotated")
+	}
+
+	// The fresh access token works at the gateway.
+	req := httptest.NewRequest(http.MethodGet, "http://svc."+gatewayDomainName+"/", nil)
+	req.Host = "svc." + gatewayDomainName
+	req.Header.Set("Authorization", "Bearer "+pair.Token)
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refreshed access token = %d", rec.Code)
+	}
+
+	// The consumed refresh token cannot be replayed.
+	replay := postJSONTo(env.handler, gatewayDomainName, "/api/token", map[string]string{
+		"refresh_token": login.RefreshToken,
+	})
+	if replay.Code != http.StatusUnauthorized || errorCode(t, replay) != "invalid_refresh_token" {
+		t.Fatalf("replay = %d %q, want 401 invalid_refresh_token", replay.Code, errorCode(t, replay))
+	}
+}
+
+func TestRefreshRespectsTheScope(t *testing.T) {
+	env := newGatewayEnv(t, false)
+
+	portal := nativeLogin(t, env, "alice", alicePassword)
+	adminToken := adminLoginToken(t, env)
+	if portal.RefreshToken == "" || adminToken == "" {
+		t.Fatal("logins returned no tokens")
+	}
+
+	// An admin refresh token is rejected at the portal endpoint.
+	adminRefresh := loginAtManagement(t, env)
+	wrong := postJSONTo(env.handler, gatewayDomainName, "/api/token", map[string]string{
+		"refresh_token": adminRefresh,
+	})
+	if wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("admin refresh at the portal = %d, want 401", wrong.Code)
+	}
+
+	// The gateway refresh token is rejected at the management endpoint.
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/token",
+		bytes.NewReader([]byte(`{"refresh_token":"`+portal.RefreshToken+`"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	env.admin.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("portal refresh at the management API = %d, want 401", rec.Code)
+	}
+}
+
+func TestLogoutRevokesTheRefreshToken(t *testing.T) {
+	env := newGatewayEnv(t, false)
+	login := nativeLogin(t, env, "alice", alicePassword)
+
+	logout := httptest.NewRequest(http.MethodPost, "http://"+gatewayDomainName+"/api/logout", nil)
+	logout.Host = gatewayDomainName
+	logout.Header.Set("Authorization", "Bearer "+login.Token)
+	logoutRec := httptest.NewRecorder()
+	env.handler.ServeHTTP(logoutRec, logout)
+	if logoutRec.Code != http.StatusOK {
+		t.Fatalf("logout = %d", logoutRec.Code)
+	}
+
+	refreshed := postJSONTo(env.handler, gatewayDomainName, "/api/token", map[string]string{
+		"refresh_token": login.RefreshToken,
+	})
+	if refreshed.Code != http.StatusUnauthorized {
+		t.Fatalf("refresh after logout = %d, want 401 (the login was revoked)", refreshed.Code)
+	}
+}
+
+func TestExpiredRefreshTokenIsRejected(t *testing.T) {
+	env := newGatewayEnv(t, false)
+	login := nativeLogin(t, env, "alice", alicePassword)
+
+	env.clock.Advance(DefaultRefreshTTL + time.Hour)
+
+	refreshed := postJSONTo(env.handler, gatewayDomainName, "/api/token", map[string]string{
+		"refresh_token": login.RefreshToken,
+	})
+	if refreshed.Code != http.StatusUnauthorized {
+		t.Fatalf("expired refresh = %d, want 401", refreshed.Code)
+	}
+}
+
+// loginAtManagement returns a management refresh token.
+func loginAtManagement(t *testing.T, env *gatewayEnv) string {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]string{"username": "boss", "password": "bosspass12"})
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/login", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	env.admin.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin login = %d", rec.Code)
+	}
+	var body loginResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return body.RefreshToken
 }

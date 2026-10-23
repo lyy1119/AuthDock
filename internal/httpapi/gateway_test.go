@@ -112,7 +112,7 @@ func newGatewayEnv(t *testing.T, noDNCheck bool) *gatewayEnv {
 	clock := &fakeClock{current: time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)}
 	options := Options{
 		Store:     db,
-		Sessions:  NewDBSessions(db, DefaultSessionTTL),
+		Sessions:  NewDBSessions(db, DefaultSessionTTL, DefaultRefreshTTL),
 		Now:       clock.Now,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		NoDNCheck: noDNCheck,
@@ -451,7 +451,7 @@ func TestGatewaySessionSurvivesRestart(t *testing.T) {
 	// A second handler with a fresh session cache but the same database.
 	options := Options{
 		Store:    env.db,
-		Sessions: NewDBSessions(env.db, DefaultSessionTTL),
+		Sessions: NewDBSessions(env.db, DefaultSessionTTL, DefaultRefreshTTL),
 		Now:      env.clock.Now,
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

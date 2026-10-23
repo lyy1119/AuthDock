@@ -84,11 +84,11 @@ func TestAdminAPIRequiresSession(t *testing.T) {
 func TestAdminAPIRequiresAdminRole(t *testing.T) {
 	env := newTestEnv(t)
 
-	token, _, err := env.sessions.Create(ScopeAdmin, testPlainUsername, store.RoleUser, env.clock.Now())
+	issued, err := env.sessions.Issue(ScopeAdmin, testPlainUsername, store.RoleUser, env.clock.Now())
 	if err != nil {
 		t.Fatalf("create user session: %v", err)
 	}
-	cookie := &http.Cookie{Name: SessionCookieName, Value: token}
+	cookie := &http.Cookie{Name: SessionCookieName, Value: issued.Access}
 
 	for _, path := range []string{"/api/admin/users", "/api/admin/settings", "/api/admin/gates"} {
 		rec := doJSON(t, env, http.MethodGet, path, cookie, nil)

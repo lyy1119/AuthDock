@@ -30,9 +30,12 @@ type portalSessionResponse struct {
 	// Addresses lists the published services this account can reach, so the
 	// success panel is useful even without a bounce target.
 	Addresses []string `json:"addresses,omitempty"`
-	// Token is the session token for native clients, which send it back as
+	// Token is the access token for native clients, which send it back as
 	// "Authorization: Bearer <token>" instead of keeping a cookie.
 	Token string `json:"token,omitempty"`
+	// RefreshToken is exchanged at POST /api/token for a fresh pair.
+	RefreshToken     string `json:"refresh_token,omitempty"`
+	RefreshExpiresAt string `json:"refresh_expires_at,omitempty"`
 }
 
 type portalLoginRequest struct {
@@ -174,14 +177,14 @@ func (s *server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, session, err := s.sessions.Create(ScopeGateway, user.Username, user.Role, now)
+	issued, err := s.sessions.Issue(ScopeGateway, user.Username, user.Role, now)
 	if err != nil {
 		s.internalError(w, "create portal session", err)
 		return
 	}
 
 	domain := gatewayDomainFrom(r)
-	s.setGatewayCookie(w, r, domain, token, session.ExpiresAt)
+	s.setGatewayCookie(w, r, domain, issued.Access, issued.AccessExpiry)
 
 	// The bounce target may arrive in the JSON body, in the query string (the
 	// link the browser followed) or in the cookie the gateway set when it
@@ -217,12 +220,14 @@ func (s *server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, portalSessionResponse{
 		OK:               true,
 		User:             &userPayload{Username: user.Username, Role: user.Role},
-		ExpiresAt:        session.ExpiresAt.UTC().Format(time.RFC3339),
+		ExpiresAt:        issued.AccessExpiry.UTC().Format(time.RFC3339),
 		Domain:           domain,
 		RedirectTo:       redirectTo,
 		ReturnToRejected: redirectTo == "" && rejected != "",
 		Addresses:        addresses,
-		Token:            token,
+		Token:            issued.Access,
+		RefreshToken:     issued.Refresh,
+		RefreshExpiresAt: issued.RefreshExpiry.UTC().Format(time.RFC3339),
 	})
 }
 
@@ -241,6 +246,31 @@ func (s *server) accountAddresses(r *http.Request, user store.User, domain strin
 		}
 	}
 	return addresses
+}
+
+// handleTokenRefresh exchanges a refresh token for a new pair. The presented
+// refresh token is consumed, so each one works exactly once.
+func (s *server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if !s.decodeAdminJSON(w, r, &body) {
+		return
+	}
+
+	issued, err := s.sessions.Refresh(ScopeGateway, body.RefreshToken, s.now())
+	if err != nil {
+		s.logger.Warn("portal refresh rejected", "remote", r.RemoteAddr)
+		s.writeError(w, http.StatusUnauthorized, "invalid_refresh_token", "刷新令牌无效或已过期，请重新登录")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, tokenPairResponse{
+		OK:               true,
+		Token:            issued.Access,
+		ExpiresAt:        issued.AccessExpiry.UTC().Format(time.RFC3339),
+		RefreshToken:     issued.Refresh,
+		RefreshExpiresAt: issued.RefreshExpiry.UTC().Format(time.RFC3339),
+	})
 }
 
 // handlePortalLogout drops the gateway session cookie.

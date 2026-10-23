@@ -66,7 +66,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	clock := &fakeClock{current: time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)}
-	sessions := NewSessionStore(DefaultSessionTTL)
+	sessions := NewSessionStore(DefaultSessionTTL, DefaultRefreshTTL)
 	handler := New(Options{
 		Store:    db,
 		Now:      clock.Now,

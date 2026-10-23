@@ -13,11 +13,11 @@ func TestSessionLifecycle(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 
 	expires := now.Add(12 * time.Hour)
-	if err := db.CreateSession(ctx, ScopeAdmin, "hash-alice", "alice", RoleUser, expires); err != nil {
+	if err := db.CreateSession(ctx, ScopeAdmin, SessionKindAccess, "hash-alice", "alice", RoleUser, "", expires); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	session, ok, err := db.GetSession(ctx, ScopeAdmin, "hash-alice", now)
+	session, ok, err := db.GetSession(ctx, ScopeAdmin, SessionKindAccess, "hash-alice", now)
 	if err != nil || !ok {
 		t.Fatalf("GetSession = %+v, %v, %v", session, ok, err)
 	}
@@ -38,10 +38,10 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 
 	// Expired sessions disappear.
-	if _, ok, _ := db.GetSession(ctx, ScopeAdmin, "hash-alice", expires.Add(time.Minute)); ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeAdmin, SessionKindAccess, "hash-alice", expires.Add(time.Minute)); ok {
 		t.Fatal("an expired session was returned")
 	}
-	if _, ok, _ := db.GetSession(ctx, ScopeAdmin, "hash-alice", now); ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeAdmin, SessionKindAccess, "hash-alice", now); ok {
 		t.Fatal("the expired session was not cleaned up")
 	}
 }
@@ -51,10 +51,10 @@ func TestPruneSessions(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 
-	if err := db.CreateSession(ctx, ScopeGateway, "old", "alice", RoleUser, now.Add(-time.Hour)); err != nil {
+	if err := db.CreateSession(ctx, ScopeGateway, SessionKindAccess, "old", "alice", RoleUser, "", now.Add(-time.Hour)); err != nil {
 		t.Fatalf("CreateSession(old): %v", err)
 	}
-	if err := db.CreateSession(ctx, ScopeGateway, "fresh", "bob", RoleUser, now.Add(time.Hour)); err != nil {
+	if err := db.CreateSession(ctx, ScopeGateway, SessionKindAccess, "fresh", "bob", RoleUser, "", now.Add(time.Hour)); err != nil {
 		t.Fatalf("CreateSession(fresh): %v", err)
 	}
 
@@ -65,14 +65,14 @@ func TestPruneSessions(t *testing.T) {
 	if removed != 1 {
 		t.Fatalf("removed = %d, want 1", removed)
 	}
-	if _, ok, _ := db.GetSession(ctx, ScopeGateway, "fresh", now); !ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeGateway, SessionKindAccess, "fresh", now); !ok {
 		t.Fatal("the live session was pruned")
 	}
 
 	if err := db.DeleteSession(ctx, "fresh"); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
-	if _, ok, _ := db.GetSession(ctx, ScopeGateway, "fresh", now); ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeGateway, SessionKindAccess, "fresh", now); ok {
 		t.Fatal("DeleteSession left the session behind")
 	}
 }
@@ -166,19 +166,82 @@ func TestSessionScopesAreSeparate(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 	expires := now.Add(time.Hour)
 
-	if err := db.CreateSession(ctx, ScopeAdmin, "hash-boss", "boss", RoleAdmin, expires); err != nil {
+	if err := db.CreateSession(ctx, ScopeAdmin, SessionKindAccess, "hash-boss", "boss", RoleAdmin, "", expires); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
 	// The same token hash is only valid in the scope it was created for.
-	if _, ok, _ := db.GetSession(ctx, ScopeGateway, "hash-boss", now); ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeGateway, SessionKindAccess, "hash-boss", now); ok {
 		t.Fatal("an admin session was accepted in the gateway scope")
 	}
-	if _, ok, _ := db.GetSession(ctx, ScopeAdmin, "hash-boss", now); !ok {
+	if _, ok, _ := db.GetSession(ctx, ScopeAdmin, SessionKindAccess, "hash-boss", now); !ok {
 		t.Fatal("the admin session was not found in its own scope")
 	}
 
-	if err := db.CreateSession(ctx, "nonsense", "hash-x", "alice", RoleUser, expires); err == nil {
+	if err := db.CreateSession(ctx, "nonsense", SessionKindAccess, "hash-x", "alice", RoleUser, "", expires); err == nil {
 		t.Fatal("CreateSession accepted an unknown scope")
+	}
+}
+
+func TestRotateRefreshSession(t *testing.T) {
+	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
+	ctx := context.Background()
+	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+
+	if err := db.CreateSession(ctx, ScopeGateway, SessionKindRefresh, "refresh-1", "alice", RoleUser, "family-1", now.Add(24*time.Hour)); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	session, ok, err := db.RotateRefreshSession(ctx, ScopeGateway,
+		"refresh-1", "refresh-2", "access-2", now.Add(time.Hour), now.Add(48*time.Hour), now)
+	if err != nil || !ok {
+		t.Fatalf("RotateRefreshSession = %v, %v", ok, err)
+	}
+	if session.Username != "alice" || session.Family != "family-1" {
+		t.Fatalf("rotated session = %+v", session)
+	}
+
+	// The presented refresh token is consumed exactly once.
+	if _, ok, _ := db.GetSession(ctx, ScopeGateway, SessionKindRefresh, "refresh-1", now); ok {
+		t.Fatal("the old refresh token is still usable")
+	}
+	if _, ok, _ := db.GetSession(ctx, ScopeGateway, SessionKindRefresh, "refresh-2", now); !ok {
+		t.Fatal("the new refresh token is missing")
+	}
+	if _, ok, _ := db.GetSession(ctx, ScopeGateway, SessionKindAccess, "access-2", now); !ok {
+		t.Fatal("the new access token is missing")
+	}
+
+	// Replaying the consumed token fails without issuing anything.
+	if _, ok, _ := db.RotateRefreshSession(ctx, ScopeGateway,
+		"refresh-1", "refresh-3", "access-3", now.Add(time.Hour), now.Add(48*time.Hour), now); ok {
+		t.Fatal("a consumed refresh token was accepted")
+	}
+
+	// Revoking the family drops both kinds.
+	if err := db.RevokeSessionFamily(ctx, "access-2"); err != nil {
+		t.Fatalf("RevokeSessionFamily: %v", err)
+	}
+	for _, probe := range []struct{ kind, hash string }{
+		{SessionKindAccess, "access-2"},
+		{SessionKindRefresh, "refresh-2"},
+	} {
+		if _, ok, _ := db.GetSession(ctx, ScopeGateway, probe.kind, probe.hash, now); ok {
+			t.Fatalf("%s/%s survived the family revocation", probe.kind, probe.hash)
+		}
+	}
+}
+
+func TestExpiredRefreshSessionIsRejected(t *testing.T) {
+	db := openTestStore(t, filepath.Join(t.TempDir(), "authdock.db"))
+	ctx := context.Background()
+	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+
+	if err := db.CreateSession(ctx, ScopeGateway, SessionKindRefresh, "refresh-old", "alice", RoleUser, "", now.Add(-time.Minute)); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, ok, err := db.RotateRefreshSession(ctx, ScopeGateway,
+		"refresh-old", "refresh-new", "access-new", now.Add(time.Hour), now.Add(48*time.Hour), now); ok || err != nil {
+		t.Fatalf("expired refresh = %v, %v; want rejected without error", ok, err)
 	}
 }

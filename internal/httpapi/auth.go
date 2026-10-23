@@ -31,9 +31,20 @@ type loginResponse struct {
 	OK        bool         `json:"ok"`
 	User      *userPayload `json:"user,omitempty"`
 	ExpiresAt string       `json:"expires_at,omitempty"`
-	// Token is the session token, for clients that cannot keep a cookie (native
+	// Token is the access token, for clients that cannot keep a cookie (native
 	// apps). Send it back as "Authorization: Bearer <token>".
 	Token string `json:"token,omitempty"`
+	// RefreshToken is exchanged at POST /api/auth/token for a fresh pair.
+	RefreshToken     string `json:"refresh_token,omitempty"`
+	RefreshExpiresAt string `json:"refresh_expires_at,omitempty"`
+}
+
+type tokenPairResponse struct {
+	OK               bool   `json:"ok"`
+	Token            string `json:"token"`
+	ExpiresAt        string `json:"expires_at"`
+	RefreshToken     string `json:"refresh_token"`
+	RefreshExpiresAt string `json:"refresh_expires_at"`
 }
 
 type sessionResponse struct {
@@ -118,20 +129,22 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, session, err := s.sessions.Create(ScopeAdmin, user.Username, user.Role, now)
+	issued, err := s.sessions.Issue(ScopeAdmin, user.Username, user.Role, now)
 	if err != nil {
 		s.logger.Error("create session", "err", err)
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "服务器内部错误")
 		return
 	}
-	s.setSessionCookie(w, r, token, session.ExpiresAt)
+	s.setSessionCookie(w, r, issued.Access, issued.AccessExpiry)
 	s.logger.Info("login succeeded", "username", user.Username, "role", user.Role, "remote", r.RemoteAddr)
 
 	s.writeJSON(w, http.StatusOK, loginResponse{
-		OK:        true,
-		User:      &userPayload{Username: user.Username, Role: user.Role},
-		ExpiresAt: session.ExpiresAt.UTC().Format(time.RFC3339),
-		Token:     token,
+		OK:               true,
+		User:             &userPayload{Username: user.Username, Role: user.Role},
+		ExpiresAt:        issued.AccessExpiry.UTC().Format(time.RFC3339),
+		Token:            issued.Access,
+		RefreshToken:     issued.Refresh,
+		RefreshExpiresAt: issued.RefreshExpiry.UTC().Format(time.RFC3339),
 	})
 }
 

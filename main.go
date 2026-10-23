@@ -61,6 +61,15 @@ func run() error {
 
 	setSecureUmask()
 
+	refreshTTL := httpapi.DefaultRefreshTTL
+	if raw := os.Getenv("AUTH_DOCK_REFRESH_TTL"); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			refreshTTL = parsed
+		} else {
+			fmt.Fprintf(os.Stderr, "AUTH_DOCK_REFRESH_TTL=%q is not a duration, using %s\n", raw, refreshTTL)
+		}
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
@@ -118,7 +127,7 @@ func run() error {
 	// The gateway and the management UI share the store: one login covers both.
 	options := httpapi.Options{
 		Store:     db,
-		Sessions:  httpapi.NewDBSessions(db, httpapi.DefaultSessionTTL),
+		Sessions:  httpapi.NewDBSessions(db, httpapi.DefaultSessionTTL, refreshTTL),
 		Limiter:   httpapi.NewAttemptLimiter(5, time.Minute, 15*time.Minute),
 		Logger:    logger,
 		NoDNCheck: *noDNCheck,

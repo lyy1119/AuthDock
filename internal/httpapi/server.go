@@ -68,6 +68,7 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("/api/auth/login", s.onlyMethod(http.MethodPost, s.handleLogin))
 	mux.HandleFunc("/api/auth/logout", s.onlyMethod(http.MethodPost, s.handleLogout))
 	mux.HandleFunc("/api/auth/session", s.onlyMethod(http.MethodGet, s.handleSession))
+	mux.HandleFunc("/api/auth/token", s.onlyMethod(http.MethodPost, s.handleAdminTokenRefresh))
 
 	// Management API.
 	mux.HandleFunc("/api/admin/users", s.requireAdmin(s.handleAdminUsers))
@@ -101,6 +102,7 @@ func NewPortal(opts Options) http.Handler {
 	mux.HandleFunc("/api/login", s.portalGuard(s.onlyMethod(http.MethodPost, s.handlePortalLogin)))
 	mux.HandleFunc("/api/logout", s.portalGuard(s.onlyMethod(http.MethodPost, s.handlePortalLogout)))
 	mux.HandleFunc("/api/session", s.portalGuard(s.onlyMethod(http.MethodGet, s.handlePortalSession)))
+	mux.HandleFunc("/api/token", s.portalGuard(s.onlyMethod(http.MethodPost, s.handleTokenRefresh)))
 	mux.HandleFunc("/api/", s.portalGuard(s.handleUnknownAPI))
 	mux.HandleFunc("/healthz", s.portalGuard(s.onlyMethod(http.MethodGet, s.handleHealth)))
 
@@ -122,7 +124,7 @@ func newServer(opts Options) *server {
 		noDNCheck: opts.NoDNCheck,
 	}
 	if s.sessions == nil {
-		s.sessions = NewSessionStore(DefaultSessionTTL)
+		s.sessions = NewSessionStore(DefaultSessionTTL, DefaultRefreshTTL)
 	}
 	if s.limiter == nil {
 		s.limiter = NewAttemptLimiter(5, time.Minute, 15*time.Minute)

@@ -111,7 +111,7 @@ func (s *server) serveGateway(w http.ResponseWriter, r *http.Request) {
 
 func isPortalPath(path string) bool {
 	switch path {
-	case "/", "/login", "/api/login", "/api/logout", "/api/session":
+	case "/", "/login", "/api/login", "/api/logout", "/api/session", "/api/token":
 		return true
 	}
 	return false
@@ -139,6 +139,8 @@ func (s *server) servePortalRoutes(w http.ResponseWriter, r *http.Request, domai
 	case "/api/session":
 		// The portal reports the gateway session, never the management one.
 		s.onlyMethod(http.MethodGet, s.handlePortalSession)(w, r)
+	case "/api/token":
+		s.onlyMethod(http.MethodPost, s.handleTokenRefresh)(w, r)
 	default:
 		http.NotFound(w, r)
 	}
